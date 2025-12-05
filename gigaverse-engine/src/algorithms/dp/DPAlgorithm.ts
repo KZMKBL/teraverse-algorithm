@@ -1,13 +1,4 @@
 // path: gigaverse-engine/src/algorithms/dp/DPAlgorithm.ts
-/**
- * A Probabilistic DP approach (Expectimax).
- * Features:
- * 1. Hybrid Decision Making: Pure Rules for Loot, Expectimax for Combat.
- * 2. Fast Cloning: JSON based cloning for performance.
- * 3. Robust Memoization: Includes enemy state in cache key.
- * 4. Smart Loot Filter: Exact string matching & "Potential Value" logic.
- * 5. Debug Logging: Detailed loot analysis.
- */
 
 import {
   IGigaverseAlgorithm,
@@ -45,7 +36,7 @@ export class DPAlgorithm implements IGigaverseAlgorithm {
   private logger: CustomLogger;
 
   constructor(config: DPConfig, logger?: CustomLogger) {
-    // DERİNLİK AYARI: Hız yaması sayesinde 6'ya çıkıyoruz.
+    // Hız yaması sayesinde derinliği 6'ya sabitliyoruz.
     const targetHorizon = Math.max(config.maxHorizon, 6);
 
     this.config = {
@@ -59,50 +50,37 @@ export class DPAlgorithm implements IGigaverseAlgorithm {
   public pickAction(state: GigaverseRunState): GigaverseAction {
     this.memo.clear();
     
-    // --- 1. LOOT FAZI: SAF TÜCCAR MODU (Simülasyon YOK) ---
-    // Burada geleceği simüle etmiyoruz, sadece kurallara bakıyoruz.
+    // --- 1. LOOT FAZI: SAF KURAL MODU (SİMÜLASYONSUZ) ---
+    // Burada geleceği simüle etmiyoruz, sadece belirlediğimiz katı kurallara bakıyoruz.
     if (state.lootPhase) {
         return this.pickBestLoot(state);
     }
 
     // --- 2. SAVAŞ FAZI: EXPECTIMAX SİMÜLASYONU ---
+    // Savaşta ise geleceği (6 hamle) simüle ediyoruz.
     const result = this.expectimaxSearch(state, this.config.maxHorizon);
     
     if (!result.bestAction) {
-      // Acil durum fallback
       return { type: GigaverseActionType.MOVE_ROCK };
     }
     
     return result.bestAction;
   }
 
-  // =================================================================
-  // LOOT (GANİMET) MANTIĞI - DEDEKTİF MODU
-  // =================================================================
+  // --- LOOT SEÇİMİ (TEMİZ & KARARLI) ---
   private pickBestLoot(state: GigaverseRunState): GigaverseAction {
       let bestScore = -Infinity;
       let bestIdx = 0;
 
-      const p = state.player;
-      
-      this.logger.info(`\n📦 --- LOOT ZAMANI --- [Can: ${p.health.current}/${p.health.max}]`);
-
       for(let i=0; i < state.lootOptions.length; i++) {
           const loot = state.lootOptions[i];
-          const score = this.getLootSynergyScore(state, loot); // Puanı hesapla
+          const score = this.getLootSynergyScore(state, loot);
           
           if(score > bestScore) {
               bestScore = score;
               bestIdx = i;
           }
       }
-
-      // Kazananı logla
-      const winnerName = state.lootOptions[bestIdx]?.boonTypeString || "???";
-      const winnerVal1 = state.lootOptions[bestIdx]?.selectedVal1;
-      const winnerVal2 = state.lootOptions[bestIdx]?.selectedVal2;
-      
-      this.logger.info(`✅ SEÇİLEN: [${winnerName}] (+${winnerVal1}|+${winnerVal2}) => Puan: ${bestScore.toFixed(0)}\n`);
 
       switch(bestIdx) {
           case 0: return { type: GigaverseActionType.PICK_LOOT_ONE };
@@ -113,6 +91,7 @@ export class DPAlgorithm implements IGigaverseAlgorithm {
       }
   }
 
+  // --- PUANLAMA MOTORU ---
   private getLootSynergyScore(state: GigaverseRunState, loot: any): number {
     const p = state.player;
     const rawType = (loot.boonTypeString || "").toString();
@@ -121,28 +100,21 @@ export class DPAlgorithm implements IGigaverseAlgorithm {
     const val1 = loot.selectedVal1 || 0;
     const val2 = loot.selectedVal2 || 0;
 
-    // --- TİP AYRIŞTIRMA (STRING FIX) ---
-    // MAX HEALTH: "AddMaxHealth" veya ekranda görünen "Health Upgrade"
-    const isMaxHP = rawType === "AddMaxHealth" || t.includes("health upgrade") || t.includes("addmaxhealth") || (t.includes("health") && t.includes("max"));
+    // --- TİP AYRIŞTIRMA (KESİN EŞLEŞME) ---
+    
+    // MAX HEALTH: "AddMaxHealth" veya arayüz adı "Health Upgrade"
+    const isMaxHP = rawType === "AddMaxHealth" || t.includes("health upgrade") || t.includes("addmaxhealth");
 
-    // MAX ARMOR: "AddMaxArmor" veya ekranda görünen "Armor Upgrade"
+    // MAX ARMOR: "AddMaxArmor" veya arayüz adı "Armor Upgrade"
     const isArmor = rawType === "AddMaxArmor" || t.includes("armor upgrade") || t.includes("addmaxarmor");
 
-    // HEAL: "Heal" (Sadece ve sadece bu string, MaxHP ile karışmasın)
+    // HEAL: Sadece "Heal" stringi (MaxHP ile karışmaması garanti)
     const isHeal = (rawType === "Heal" || t === "heal" || t.includes("potion")) && !isMaxHP;
 
     // SİLAHLAR (Mapping: Rock->Sword, Paper->Shield, Scissor->Spell)
     const isRock = rawType === "UpgradeRock" || t.includes("sword") || t.includes("rock");
     const isPaper = rawType === "UpgradePaper" || t.includes("shield") || t.includes("paper");
     const isScissor = rawType === "UpgradeScissor" || t.includes("spell") || t.includes("magic") || t.includes("scissor");
-
-    let detected = "❓ BİLİNMEYEN";
-    if (isMaxHP) detected = "❤️ MAX HP";
-    if (isArmor) detected = "🛡️ MAX ARMOR";
-    if (isHeal) detected = "💊 HEAL";
-    if (isRock) detected = "⚔️ SWORD";
-    if (isPaper) detected = "🛡️ SHIELD";
-    if (isScissor) detected = "🔮 SPELL";
 
     // === DURUM A: HEAL (GERÇEK İKSİR) ===
     if (isHeal) {
@@ -151,16 +123,13 @@ export class DPAlgorithm implements IGigaverseAlgorithm {
         const missing = max - current;
 
         // Can zaten full veya fulle çok yakınsa (-Sonsuz Puan)
-        if (missing < 1) {
-             this.logger.info(`   ❌ ${rawType}: Can Full -> RED (-999k)`);
-             return -999999;
-        }
-        if (current / max > 0.90) {
-             this.logger.info(`   ❌ ${rawType}: Can %90+ -> RED (-5000)`);
-             return -5000;
-        }
+        if (missing < 1) return -999999;
+        
+        // Can %90 üzerindeyse alma
+        if (current / max > 0.90) return -5000;
 
-        const effectiveHeal = Math.min(missing, val1);
+        const healAmount = loot.selectedVal1 || 0;
+        const effectiveHeal = Math.min(missing, healAmount);
         
         // Aciliyet Hesabı
         const hpPercent = current / max;
@@ -168,9 +137,7 @@ export class DPAlgorithm implements IGigaverseAlgorithm {
         if (hpPercent < 0.30) urgency = 50;      // ÖLÜM KALIM
         else if (hpPercent < 0.50) urgency = 10; // İHTİYAÇ
         
-        const finalScore = effectiveHeal * urgency * 5;
-        this.logger.info(`   💊 ${rawType}: Aciliyet x${urgency} -> Puan: ${finalScore.toFixed(0)}`);
-        return finalScore;
+        return effectiveHeal * urgency * 5;
     }
 
     // === DURUM B: MAX HEALTH (TIER S) ===
@@ -178,9 +145,7 @@ export class DPAlgorithm implements IGigaverseAlgorithm {
         let jackpot = 0;
         if (val1 >= 4) jackpot = 500;
         // +2 Health = 300 Puan.
-        const finalScore = (val1 * 150) + jackpot;
-        this.logger.info(`   ❤️ ${rawType} (+${val1}): Tier S -> Puan: ${finalScore.toFixed(0)}`);
-        return finalScore;
+        return (val1 * 150) + jackpot;
     }
 
     // === DURUM C: MAX ARMOR (TIER S) ===
@@ -188,9 +153,7 @@ export class DPAlgorithm implements IGigaverseAlgorithm {
         let jackpot = 0;
         if (val1 >= 3) jackpot = 400;
         // +2 Armor = 240 Puan.
-        const finalScore = (val1 * 120) + jackpot;
-        this.logger.info(`   🛡️ ${rawType} (+${val1}): Tier S -> Puan: ${finalScore.toFixed(0)}`);
-        return finalScore;
+        return (val1 * 120) + jackpot;
     }
 
     // === DURUM D: SİLAH GELİŞTİRMELERİ ===
@@ -199,17 +162,15 @@ export class DPAlgorithm implements IGigaverseAlgorithm {
         const val = isAtk ? val1 : val2;
 
         // +1 Çöp Filtresi (Yumuşak Ceza)
+        // Eğer +1 ise puanı %90 kırpılır. +2 Can (300 Puan) karşısında şansı kalmaz.
         let lowTierPenalty = 1.0;
-        let note = "";
-        if (val === 1) {
-            lowTierPenalty = 0.1; 
-            note = " [⚠️ +1 CEZASI]";
-        }
+        if (val === 1) lowTierPenalty = 0.1; 
 
         let charges = 0;
         let currentStat = 0;
         let buildMultiplier = 1.0;
 
+        // DOĞRU EŞLEŞTİRME
         if (isRock) {
             charges = p.rock.currentCharges;
             currentStat = isAtk ? p.rock.currentATK : p.rock.currentDEF;
@@ -228,11 +189,8 @@ export class DPAlgorithm implements IGigaverseAlgorithm {
         let usefulness = 1.0;
         if (isAtk) {
             const armorPercent = p.armor.max > 0 ? p.armor.current / p.armor.max : 0;
-            if (armorPercent > 0.9) {
-                usefulness = 1.8; // Zırh dolu, Saldırı Modu
-            } else {
-                usefulness = 1.2;
-            }
+            if (armorPercent > 0.9) usefulness = 1.8; // Zırh dolu, Saldırı Modu
+            else usefulness = 1.2;
         } else {
             // Defans eşyası
             if (currentStat < p.armor.max) usefulness = 1.5; 
@@ -240,32 +198,26 @@ export class DPAlgorithm implements IGigaverseAlgorithm {
         }
 
         const powerValue = Math.pow(val, 2);
-        // POTANSİYEL HESABI (Mermiden Bağımsız Değer)
+        // POTANSİYEL HESABI (Mermiden Bağımsız Değer - Yatırımcı Modu)
         const POTENTIAL_FACTOR = 18; 
 
         // Hesaplama
         let baseScore = 0;
         if (charges > 0) {
             const effectiveCharges = Math.min(charges, 5);
-            // Tie-breaker bonusu (Mermi varsa bir tık daha iyidir)
             baseScore = powerValue * POTENTIAL_FACTOR * effectiveCharges * buildMultiplier * usefulness + (currentStat * 2);
         } else {
             baseScore = powerValue * POTENTIAL_FACTOR * buildMultiplier;
         }
 
-        const finalScore = baseScore * lowTierPenalty;
-        this.logger.info(`   ⚔️ ${rawType} (+${val}): ${detected} -> Puan: ${finalScore.toFixed(0)}${note}`);
-        return finalScore;
+        return baseScore * lowTierPenalty;
     }
 
     // Bilinmeyen eşya
-    this.logger.warn(`   ❓ BİLİNMEYEN: "${rawType}" -> Puan: 0`);
     return 0;
   }
 
-  // =================================================================
-  // SAVAŞ (COMBAT) MANTIĞI - EXPECTIMAX
-  // =================================================================
+  // --- EXPECTIMAX ARAMA MOTORU (SADECE SAVAŞ) ---
   private expectimaxSearch(state: GigaverseRunState, depth: number): DPResult {
     if (depth <= 0 || state.player.health.current <= 0 || state.currentEnemyIndex >= state.enemies.length) {
       return { bestValue: this.config.evaluateFn(state), bestAction: null };
@@ -322,12 +274,12 @@ export class DPAlgorithm implements IGigaverseAlgorithm {
       return totalWeightedScore;
   }
 
-  // --- PERFORMANS YAMASI (FAST CLONE) ---
+  // --- HIZLI KOPYALAMA ---
   private fastClone(state: GigaverseRunState): GigaverseRunState {
       return JSON.parse(JSON.stringify(state));
   }
 
-  // --- SESSİZ FİZİK MOTORU (LOGSUZ) ---
+  // --- FİZİK MOTORU (SESSİZ) ---
   private applyRoundOutcome(state: GigaverseRunState, pMove: MoveType, eMove: MoveType) {
       const p = state.player;
       const e = state.enemies[state.currentEnemyIndex];
