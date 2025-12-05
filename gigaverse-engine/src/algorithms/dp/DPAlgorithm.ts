@@ -36,7 +36,6 @@ export class DPAlgorithm implements IGigaverseAlgorithm {
   private logger: CustomLogger;
 
   constructor(config: DPConfig, logger?: CustomLogger) {
-    // Hız yaması sayesinde derinliği 6'ya sabitliyoruz.
     const targetHorizon = Math.max(config.maxHorizon, 6);
 
     this.config = {
@@ -50,14 +49,12 @@ export class DPAlgorithm implements IGigaverseAlgorithm {
   public pickAction(state: GigaverseRunState): GigaverseAction {
     this.memo.clear();
     
-    // --- 1. LOOT FAZI: SAF KURAL MODU (SİMÜLASYONSUZ) ---
-    // Burada geleceği simüle etmiyoruz, sadece belirlediğimiz katı kurallara bakıyoruz.
+    // LOOT PHASE: Saf Kural Modu (Simulation-Free)
     if (state.lootPhase) {
         return this.pickBestLoot(state);
     }
 
-    // --- 2. SAVAŞ FAZI: EXPECTIMAX SİMÜLASYONU ---
-    // Savaşta ise geleceği (6 hamle) simüle ediyoruz.
+    // COMBAT PHASE: Expectimax
     const result = this.expectimaxSearch(state, this.config.maxHorizon);
     
     if (!result.bestAction) {
@@ -67,7 +64,7 @@ export class DPAlgorithm implements IGigaverseAlgorithm {
     return result.bestAction;
   }
 
-  // --- LOOT SEÇİMİ (TEMİZ & KARARLI) ---
+  // --- LOOT SEÇİMİ ---
   private pickBestLoot(state: GigaverseRunState): GigaverseAction {
       let bestScore = -Infinity;
       let bestIdx = 0;
@@ -91,7 +88,7 @@ export class DPAlgorithm implements IGigaverseAlgorithm {
       }
   }
 
-  // --- PUANLAMA MOTORU ---
+  // --- PUANLAMA MOTORU (DÜZELTİLMİŞ MATEMATİK) ---
   private getLootSynergyScore(state: GigaverseRunState, loot: any): number {
     const p = state.player;
     const rawType = (loot.boonTypeString || "").toString();
@@ -100,118 +97,93 @@ export class DPAlgorithm implements IGigaverseAlgorithm {
     const val1 = loot.selectedVal1 || 0;
     const val2 = loot.selectedVal2 || 0;
 
-    // --- TİP AYRIŞTIRMA (KESİN EŞLEŞME) ---
-    
-    // MAX HEALTH: "AddMaxHealth" veya arayüz adı "Health Upgrade"
+    // TİP AYRIŞTIRMA (Kesin Eşleşme)
     const isMaxHP = rawType === "AddMaxHealth" || t.includes("health upgrade") || t.includes("addmaxhealth");
-
-    // MAX ARMOR: "AddMaxArmor" veya arayüz adı "Armor Upgrade"
     const isArmor = rawType === "AddMaxArmor" || t.includes("armor upgrade") || t.includes("addmaxarmor");
-
-    // HEAL: Sadece "Heal" stringi (MaxHP ile karışmaması garanti)
     const isHeal = (rawType === "Heal" || t === "heal" || t.includes("potion")) && !isMaxHP;
 
-    // SİLAHLAR (Mapping: Rock->Sword, Paper->Shield, Scissor->Spell)
     const isRock = rawType === "UpgradeRock" || t.includes("sword") || t.includes("rock");
     const isPaper = rawType === "UpgradePaper" || t.includes("shield") || t.includes("paper");
     const isScissor = rawType === "UpgradeScissor" || t.includes("spell") || t.includes("magic") || t.includes("scissor");
 
-    // === DURUM A: HEAL (GERÇEK İKSİR) ===
+    // === DURUM A: HEAL ===
     if (isHeal) {
         const current = p.health.current;
         const max = p.health.max;
         const missing = max - current;
 
-        // Can zaten full veya fulle çok yakınsa (-Sonsuz Puan)
-        if (missing < 1) return -999999;
-        
-        // Can %90 üzerindeyse alma
+        if (missing < 1) return -999999; 
         if (current / max > 0.90) return -5000;
 
         const healAmount = loot.selectedVal1 || 0;
         const effectiveHeal = Math.min(missing, healAmount);
         
-        // Aciliyet Hesabı
         const hpPercent = current / max;
         let urgency = 1;
-        if (hpPercent < 0.30) urgency = 50;      // ÖLÜM KALIM
-        else if (hpPercent < 0.50) urgency = 10; // İHTİYAÇ
+        if (hpPercent < 0.30) urgency = 50;      
+        else if (hpPercent < 0.50) urgency = 10; 
         
         return effectiveHeal * urgency * 5;
     }
 
-    // === DURUM B: MAX HEALTH (TIER S) ===
+    // === DURUM B: MAX HEALTH ===
     if (isMaxHP) {
         let jackpot = 0;
         if (val1 >= 4) jackpot = 500;
-        // +2 Health = 300 Puan.
         return (val1 * 150) + jackpot;
     }
 
-    // === DURUM C: MAX ARMOR (TIER S) ===
+    // === DURUM C: MAX ARMOR ===
     if (isArmor) {
         let jackpot = 0;
         if (val1 >= 3) jackpot = 400;
-        // +2 Armor = 240 Puan.
         return (val1 * 120) + jackpot;
     }
 
-    // === DURUM D: SİLAH GELİŞTİRMELERİ (DÜZELTİLMİŞ MATEMATİK) ===
+    // === DURUM D: SİLAH GELİŞTİRMELERİ (ENFLASYONSUZ) ===
     if (isRock || isPaper || isScissor) {
         const isAtk = val1 > 0;
         const val = isAtk ? val1 : val2;
 
-        // +1 Çöp Filtresi (Yumuşak Ceza)
         let lowTierPenalty = 1.0;
         if (val === 1) lowTierPenalty = 0.1; 
 
-        // Build Çarpanları
         let buildMultiplier = 1.0;
-        if (isRock) { // Sword (Favori)
-            buildMultiplier = 1.5; 
-        } else if (isPaper) { // Shield (Favori)
-            buildMultiplier = 1.5; 
-        } else if (isScissor) { // Spell (Zayıf)
-            buildMultiplier = 0.7; 
-        }
+        if (isRock) buildMultiplier = 1.5; 
+        else if (isPaper) buildMultiplier = 1.5; 
+        else if (isScissor) buildMultiplier = 0.7; 
 
-        // Zırh/Saldırı Stratejisi (Usefulness)
+        // Usefulness Check
         let usefulness = 1.0;
         if (isAtk) {
             const armorPercent = p.armor.max > 0 ? p.armor.current / p.armor.max : 0;
-            // Zırh doluyken saldırı çok daha değerlidir
             if (armorPercent > 0.9) usefulness = 1.8;
             else usefulness = 1.2;
         } else {
-            // Defans eşyası
             let currentStat = 0;
             if (isRock) currentStat = p.rock.currentDEF;
             else if (isPaper) currentStat = p.paper.currentDEF;
             else if (isScissor) currentStat = p.scissor.currentDEF;
 
-            // Zırh kapasitemizden düşükse defans almak mantıklıdır
             if (currentStat < p.armor.max) usefulness = 1.5; 
             else usefulness = 0.8;
         }
 
-        const powerValue = Math.pow(val, 2); // Gücün Karesi (Önemli)
+        const powerValue = Math.pow(val, 2);
         
         // --- DÜZELTİLMİŞ FORMÜL ---
-        // Eskiden (18 * 5 = 90) ile çarpıyorduk, çok fazlaydı.
-        // Şimdi standart bir "45" katsayısı ile çarpıyoruz.
-        // +2 Kılıç = 4 * 45 * 1.5 = 270 Puan. (+2 Can 300 Puan olduğu için CAN KAZANIR ✅)
-        // +3 Kılıç = 9 * 45 * 1.5 = 607 Puan. (Çok güçlü silah, +2 Canı geçer ama +4 Canı geçemez ✅)
-        
+        // Artık mermi sayısıyla değil, sabit katsayıyla çarpıyoruz.
+        // Mermi sayısı sadece %20'lik bir bonus veya ceza yaratır.
         const WEAPON_BASE_MULTIPLIER = 45; 
 
-        // Ayrıca mermimiz çoksa ufak bir "Bonus" ekleyelim, ana çarpan yapmayalım.
         let chargeBonus = 1.0;
         let myCharges = 0;
         if (isRock) myCharges = p.rock.currentCharges;
         else if (isPaper) myCharges = p.paper.currentCharges;
         else if (isScissor) myCharges = p.scissor.currentCharges;
 
-        if (myCharges >= 3) chargeBonus = 1.2; // Full mermim varsa bu silahı daha çok isterim
+        if (myCharges >= 3) chargeBonus = 1.2; 
+        else if (myCharges <= 0) chargeBonus = 0.8;
 
         let finalScore = powerValue * WEAPON_BASE_MULTIPLIER * buildMultiplier * usefulness * chargeBonus;
 
@@ -225,11 +197,10 @@ export class DPAlgorithm implements IGigaverseAlgorithm {
         return finalScore * lowTierPenalty;
     }
 
-    // Bilinmeyen eşya
     return 0;
   }
 
-  // --- EXPECTIMAX ARAMA MOTORU (SADECE SAVAŞ) ---
+  // --- EXPECTIMAX (SAVAŞ) ---
   private expectimaxSearch(state: GigaverseRunState, depth: number): DPResult {
     if (depth <= 0 || state.player.health.current <= 0 || state.currentEnemyIndex >= state.enemies.length) {
       return { bestValue: this.config.evaluateFn(state), bestAction: null };
@@ -286,12 +257,10 @@ export class DPAlgorithm implements IGigaverseAlgorithm {
       return totalWeightedScore;
   }
 
-  // --- HIZLI KOPYALAMA ---
   private fastClone(state: GigaverseRunState): GigaverseRunState {
       return JSON.parse(JSON.stringify(state));
   }
 
-  // --- FİZİK MOTORU (SESSİZ) ---
   private applyRoundOutcome(state: GigaverseRunState, pMove: MoveType, eMove: MoveType) {
       const p = state.player;
       const e = state.enemies[state.currentEnemyIndex];
@@ -378,7 +347,6 @@ export class DPAlgorithm implements IGigaverseAlgorithm {
       return MoveType.SCISSOR;
   }
 
-  // --- HAFIZA ANAHTARI ---
   private buildStateKey(state: GigaverseRunState, depth: number): string {
     const p = state.player;
     const e = state.enemies[state.currentEnemyIndex]; 
