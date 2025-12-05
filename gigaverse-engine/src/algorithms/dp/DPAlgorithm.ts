@@ -1,15 +1,4 @@
 // path: gigaverse-engine/src/algorithms/dp/DPAlgorithm.ts
-/**
- * A Probabilistic DP approach (Expectimax).
- * Instead of relying on a random simulator, it calculates the
- * "Weighted Average Outcome" against all possible enemy moves.
- * * FEATURES:
- * - Expectimax Logic (No RNG dependence)
- * - Fast Cloning (Performance Boost)
- * - Robust Memoization (Enemy State Tracking)
- * - Smart Loot Filter (Exact Match + Trash Filter)
- * - Debug Logging (Detailed Decision Analysis)
- */
 
 import {
   IGigaverseAlgorithm,
@@ -47,7 +36,6 @@ export class DPAlgorithm implements IGigaverseAlgorithm {
   private logger: CustomLogger;
 
   constructor(config: DPConfig, logger?: CustomLogger) {
-    // DERİNLİK AYARI: Hız yaması sayesinde 6'ya çıkıyoruz.
     const targetHorizon = Math.max(config.maxHorizon, 6);
 
     this.config = {
@@ -56,64 +44,55 @@ export class DPAlgorithm implements IGigaverseAlgorithm {
     };
     this.logger = logger ?? defaultLogger;
     this.memo = new Map();
-
-    this.logger.info(
-      `[DPAlgorithm] Initialized Expectimax (Fast Mode) => maxHorizon=${this.config.maxHorizon}`
-    );
+    
+    // Başlangıç logunu da kapattım, sadece loot odaklı olalım.
   }
 
   public pickAction(state: GigaverseRunState): GigaverseAction {
     this.memo.clear();
     
-    // Loot Phase ise Akıllı Loot Seçicisine git
+    // --- SADECE BURADA KONUŞACAK (LOOT PHASE) ---
     if (state.lootPhase) {
         return this.pickBestLoot(state);
     }
 
+    // --- SAVAŞ MODU (TAMAMEN SESSİZ) ---
     const result = this.expectimaxSearch(state, this.config.maxHorizon);
     
     if (!result.bestAction) {
-      this.logger.warn("[DPAlgorithm] No best action => fallback=MOVE_ROCK");
       return { type: GigaverseActionType.MOVE_ROCK };
     }
     
-    this.logger.debug(
-      `[DPAlgorithm] bestAction => ${result.bestAction.type}, ExpectedValue=${result.bestValue.toFixed(2)}`
-    );
+    // Savaş hamlelerini loglamıyoruz artık.
     return result.bestAction;
   }
 
-  // --- LOOT SEÇİMİ (DEBUG / DEDEKTİF MODU) ---
+  // --- LOOT SEÇİMİ (DEDEKTİF MODU - SADECE GEREKLİ DETAYLAR) ---
   private pickBestLoot(state: GigaverseRunState): GigaverseAction {
       let bestScore = -Infinity;
       let bestIdx = 0;
 
       const p = state.player;
-      this.logger.info("==========================================");
-      this.logger.info(`🕵️‍♂️ [LOOT DEDEKTİFİ] ANALİZ BAŞLIYOR`);
-      this.logger.info(`📊 MEVCUT DURUM: Can: ${p.health.current}/${p.health.max} | Zırh: ${p.armor.current}/${p.armor.max}`);
-      this.logger.info("==========================================");
+      
+      // Sadece Loot ekranı gelince bu blok çalışır ve konsola düşer
+      this.logger.info(`\n📦 --- LOOT ZAMANI --- [Can: ${p.health.current}/${p.health.max}]`);
 
       for(let i=0; i < state.lootOptions.length; i++) {
           const loot = state.lootOptions[i];
+          const score = this.getLootSynergyScore(state, loot); // Puanı hesapla (İçeride detay logu var)
           
-          // Puanı hesapla (İçeride detaylı log atacak)
-          this.logger.info(`--- SEÇENEK ${i + 1} ANALİZİ ---`);
-          const score = this.getLootSynergyScore(state, loot); 
-          
-          this.logger.info(`👉 SONUÇ PUANI: ${score.toFixed(1)}`);
-
           if(score > bestScore) {
               bestScore = score;
               bestIdx = i;
           }
       }
 
+      // Kazananı belirgin şekilde yaz
       const winnerName = state.lootOptions[bestIdx]?.boonTypeString || "???";
-      this.logger.info("==========================================");
-      this.logger.info(`🏆 KAZANAN: SEÇENEK ${bestIdx + 1} (${winnerName})`);
-      this.logger.info(`🌟 PUAN: ${bestScore.toFixed(1)}`);
-      this.logger.info("==========================================");
+      const winnerVal1 = state.lootOptions[bestIdx]?.selectedVal1;
+      const winnerVal2 = state.lootOptions[bestIdx]?.selectedVal2;
+      
+      this.logger.info(`✅ SEÇİLEN: [${winnerName}] (+${winnerVal1}|+${winnerVal2}) => Puan: ${bestScore.toFixed(0)}\n`);
 
       switch(bestIdx) {
           case 0: return { type: GigaverseActionType.PICK_LOOT_ONE };
@@ -124,45 +103,31 @@ export class DPAlgorithm implements IGigaverseAlgorithm {
       }
   }
 
-  // --- PUANLAMA MOTORU (KESİN EŞLEŞME + STRATEJİ) ---
+  // --- PUANLAMA MOTORU (DETAYLI ANALİZ) ---
   private getLootSynergyScore(state: GigaverseRunState, loot: any): number {
     const p = state.player;
-    // SDK'dan gelen ham string ve küçük harfli versiyonu
     const rawType = (loot.boonTypeString || "").toString();
     const t = rawType.toLowerCase();
     
-    // Değerleri logla
     const val1 = loot.selectedVal1 || 0;
     const val2 = loot.selectedVal2 || 0;
-    this.logger.info(`📝 Eşya İsmi: "${rawType}" | Değerler: ${val1} / ${val2}`);
 
-    // 1. TİP AYRIŞTIRMA (KESİN REFERANS)
-    // lootFormatter.ts dosyasındaki mapping'e göre birebir kontrol
-
-    // MAX HEALTH: "AddMaxHealth" veya ekranda görünen "Health Upgrade"
+    // TİP AYRIŞTIRMA
     const isMaxHP = rawType === "AddMaxHealth" || t.includes("health upgrade") || t.includes("addmaxhealth");
-
-    // MAX ARMOR: "AddMaxArmor" veya ekranda görünen "Armor Upgrade"
     const isArmor = rawType === "AddMaxArmor" || t.includes("armor upgrade") || t.includes("addmaxarmor");
-
-    // HEAL: "Heal" (Sadece ve sadece bu string)
-    // "Health Upgrade" içindeki 'heal' kelimesiyle karışmaması için isMaxHP kontrolü şart.
     const isHeal = (rawType === "Heal" || t === "heal") && !isMaxHP;
 
-    // SİLAHLAR (Mapping: Rock->Sword, Paper->Shield, Scissor->Spell)
     const isRock = rawType === "UpgradeRock" || t.includes("sword");
     const isPaper = rawType === "UpgradePaper" || t.includes("shield");
     const isScissor = rawType === "UpgradeScissor" || t.includes("spell");
 
-    // LOGLAMA: Bot bunu ne sandı?
-    if (isHeal) this.logger.info(`💡 Algılanan Tip: [HEAL / İKSİR]`);
-    else if (isMaxHP) this.logger.info(`💡 Algılanan Tip: [MAX HEALTH / KALICI CAN]`);
-    else if (isArmor) this.logger.info(`💡 Algılanan Tip: [MAX ARMOR / KALICI ZIRH]`);
-    else if (isRock) this.logger.info(`💡 Algılanan Tip: [SİLAH: SWORD/ROCK]`);
-    else if (isPaper) this.logger.info(`💡 Algılanan Tip: [SİLAH: SHIELD/PAPER]`);
-    else if (isScissor) this.logger.info(`💡 Algılanan Tip: [SİLAH: SPELL/SCISSOR]`);
-    else this.logger.warn(`⚠️ Algılanan Tip: [BİLİNMEYEN]`);
-
+    let detected = "❓ BİLİNMEYEN";
+    if (isMaxHP) detected = "❤️ MAX HP";
+    if (isArmor) detected = "🛡️ MAX ARMOR";
+    if (isHeal) detected = "💊 HEAL";
+    if (isRock) detected = "⚔️ SWORD";
+    if (isPaper) detected = "🛡️ SHIELD";
+    if (isScissor) detected = "🔮 SPELL";
 
     // === DURUM A: HEAL ===
     if (isHeal) {
@@ -171,24 +136,22 @@ export class DPAlgorithm implements IGigaverseAlgorithm {
         const missing = max - current;
 
         if (missing < 1) {
-             this.logger.info(`❌ KARAR: Can full, Heal reddedildi.`);
+             this.logger.info(`   ❌ ${rawType}: Can Full -> RED (-999k)`);
              return -999999;
         }
         if (current / max > 0.90) {
-             this.logger.info(`❌ KARAR: Can %90+, Heal reddedildi.`);
+             this.logger.info(`   ❌ ${rawType}: Can %90+ -> RED (-5000)`);
              return -5000;
         }
 
         const effectiveHeal = Math.min(missing, val1);
-        
-        // Aciliyet Hesabı
         const hpPercent = current / max;
         let urgency = 1;
         if (hpPercent < 0.30) urgency = 50;      
         else if (hpPercent < 0.50) urgency = 10; 
         
         const finalScore = effectiveHeal * urgency * 5;
-        this.logger.info(`✅ HESAP: Efektif: ${effectiveHeal} * Aciliyet: ${urgency} * 5 = ${finalScore}`);
+        this.logger.info(`   💊 ${rawType}: Aciliyet x${urgency} -> Puan: ${finalScore.toFixed(0)}`);
         return finalScore;
     }
 
@@ -196,9 +159,8 @@ export class DPAlgorithm implements IGigaverseAlgorithm {
     if (isMaxHP) {
         let jackpot = 0;
         if (val1 >= 4) jackpot = 500;
-        
         const finalScore = (val1 * 150) + jackpot;
-        this.logger.info(`✅ HESAP: (Val: ${val1} * 150) + Jackpot: ${jackpot} = ${finalScore}`);
+        this.logger.info(`   ❤️ ${rawType} (+${val1}): Tier S -> Puan: ${finalScore.toFixed(0)}`);
         return finalScore;
     }
 
@@ -206,9 +168,8 @@ export class DPAlgorithm implements IGigaverseAlgorithm {
     if (isArmor) {
         let jackpot = 0;
         if (val1 >= 3) jackpot = 400;
-
         const finalScore = (val1 * 120) + jackpot;
-        this.logger.info(`✅ HESAP: (Val: ${val1} * 120) + Jackpot: ${jackpot} = ${finalScore}`);
+        this.logger.info(`   🛡️ ${rawType} (+${val1}): Tier S -> Puan: ${finalScore.toFixed(0)}`);
         return finalScore;
     }
 
@@ -219,16 +180,16 @@ export class DPAlgorithm implements IGigaverseAlgorithm {
 
         // +1 Çöp Filtresi
         let lowTierPenalty = 1.0;
+        let note = "";
         if (val === 1) {
             lowTierPenalty = 0.1; 
-            this.logger.info(`⚠️ UYARI: +1 Eşya tespit edildi! Ceza Çarpanı: 0.1`);
+            note = " [⚠️ +1 CEZASI]";
         }
 
         let charges = 0;
         let currentStat = 0;
         let buildMultiplier = 1.0;
 
-        // DOĞRU EŞLEŞTİRME: Rock=Sword, Paper=Shield, Scissor=Spell
         if (isRock) {
             charges = p.rock.currentCharges;
             currentStat = isAtk ? p.rock.currentATK : p.rock.currentDEF;
@@ -243,48 +204,34 @@ export class DPAlgorithm implements IGigaverseAlgorithm {
             buildMultiplier = 0.7; 
         }
 
-        // Usefulness (Zırh Doluluk Kontrolü)
         let usefulness = 1.0;
         if (isAtk) {
             const armorPercent = p.armor.max > 0 ? p.armor.current / p.armor.max : 0;
-            if (armorPercent > 0.9) {
-                usefulness = 1.8;
-                this.logger.info(`⚔️ STRATEJİ: Zırh dolu, Saldırı Modu (x1.8)`);
-            } else {
-                usefulness = 1.2;
-            }
+            if (armorPercent > 0.9) usefulness = 1.8;
+            else usefulness = 1.2;
         } else {
-            if (currentStat < p.armor.max) {
-                usefulness = 1.5; 
-                this.logger.info(`🛡️ STRATEJİ: Defans lazım (x1.5)`);
-            } else {
-                usefulness = 0.8;
-                this.logger.info(`🛡️ STRATEJİ: Zırh taşıyor, Defans gereksiz (x0.8)`);
-            }
+            if (currentStat < p.armor.max) usefulness = 1.5; 
+            else usefulness = 0.8;
         }
 
         const powerValue = Math.pow(val, 2);
-        
-        // POTANSİYEL HESABI (Mermiden Bağımsız)
         const POTENTIAL_FACTOR = 18; 
 
-        // Hesaplama
         let baseScore = 0;
         if (charges > 0) {
             const effectiveCharges = Math.min(charges, 5);
-            // Tie-breaker bonusu (Mermi varsa bir tık daha iyidir)
-            baseScore = powerValue * POTENTIAL_FACTOR * buildMultiplier * usefulness + (currentStat * 2);
+            baseScore = powerValue * POTENTIAL_FACTOR * effectiveCharges * buildMultiplier * usefulness + (currentStat * 2);
         } else {
             baseScore = powerValue * POTENTIAL_FACTOR * buildMultiplier;
         }
 
         const finalScore = baseScore * lowTierPenalty;
-        this.logger.info(`✅ HESAP: Base: ${baseScore.toFixed(1)} * Penalty: ${lowTierPenalty} = ${finalScore.toFixed(1)}`);
+        this.logger.info(`   ⚔️ ${rawType} (+${val}): ${detected} -> Puan: ${finalScore.toFixed(0)}${note}`);
         return finalScore;
     }
 
     // Bilinmeyen eşya
-    this.logger.warn(`❌ TİP TANINAMADI: Puan 0`);
+    this.logger.warn(`   ❓ BİLİNMEYEN: "${rawType}" -> Puan: 0`);
     return 0;
   }
 
@@ -345,7 +292,7 @@ export class DPAlgorithm implements IGigaverseAlgorithm {
       return totalWeightedScore;
   }
 
-  // --- HIZLI KOPYALAMA (FAST CLONE) ---
+  // --- PERFORMANS YAMASI (FAST CLONE) ---
   private fastClone(state: GigaverseRunState): GigaverseRunState {
       return JSON.parse(JSON.stringify(state));
   }
@@ -437,7 +384,7 @@ export class DPAlgorithm implements IGigaverseAlgorithm {
       return MoveType.SCISSOR;
   }
 
-  // --- HAFIZA ANAHTARI (ROBUST KEY) ---
+  // --- HAFIZA ANAHTARI ---
   private buildStateKey(state: GigaverseRunState, depth: number): string {
     const p = state.player;
     const e = state.enemies[state.currentEnemyIndex]; 
