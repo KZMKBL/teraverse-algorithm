@@ -88,7 +88,7 @@ export class DPAlgorithm implements IGigaverseAlgorithm {
       }
   }
 
-  // --- PUANLAMA MOTORU (DÜZELTİLMİŞ MATEMATİK) ---
+  // --- PUANLAMA MOTORU (OVERKILL KORUMALI) ---
   private getLootSynergyScore(state: GigaverseRunState, loot: any): number {
     const p = state.player;
     const rawType = (loot.boonTypeString || "").toString();
@@ -97,7 +97,7 @@ export class DPAlgorithm implements IGigaverseAlgorithm {
     const val1 = loot.selectedVal1 || 0;
     const val2 = loot.selectedVal2 || 0;
 
-    // TİP AYRIŞTIRMA (Kesin Eşleşme)
+    // --- TİP AYRIŞTIRMA ---
     const isMaxHP = rawType === "AddMaxHealth" || t.includes("health upgrade") || t.includes("addmaxhealth");
     const isArmor = rawType === "AddMaxArmor" || t.includes("armor upgrade") || t.includes("addmaxarmor");
     const isHeal = (rawType === "Heal" || t === "heal" || t.includes("potion")) && !isMaxHP;
@@ -140,61 +140,76 @@ export class DPAlgorithm implements IGigaverseAlgorithm {
         return (val1 * 120) + jackpot;
     }
 
-    // === DURUM D: SİLAH GELİŞTİRMELERİ (ENFLASYONSUZ) ===
+    // === DURUM D: SİLAH GELİŞTİRMELERİ ===
     if (isRock || isPaper || isScissor) {
         const isAtk = val1 > 0;
         const val = isAtk ? val1 : val2;
 
+        // +1 Çöp Filtresi
         let lowTierPenalty = 1.0;
         if (val === 1) lowTierPenalty = 0.1; 
 
+        let charges = 0;
+        let currentStat = 0; // Mevcut ATK veya DEF değeri
         let buildMultiplier = 1.0;
-        if (isRock) buildMultiplier = 1.5; 
-        else if (isPaper) buildMultiplier = 1.5; 
-        else if (isScissor) buildMultiplier = 0.7; 
 
-        // Usefulness Check
+        // Statları ve Build'i çek
+        if (isRock) {
+            charges = p.rock.currentCharges;
+            currentStat = isAtk ? p.rock.currentATK : p.rock.currentDEF;
+            buildMultiplier = 1.5; 
+        } else if (isPaper) {
+            charges = p.paper.currentCharges;
+            currentStat = isAtk ? p.paper.currentATK : p.paper.currentDEF;
+            buildMultiplier = 1.5; 
+        } else if (isScissor) {
+            charges = p.scissor.currentCharges;
+            currentStat = isAtk ? p.scissor.currentATK : p.scissor.currentDEF;
+            buildMultiplier = 0.7; 
+        }
+
+        // --- Usefulness & OVERKILL Kontrolü ---
         let usefulness = 1.0;
+        
         if (isAtk) {
+            // SALDIRI İÇİN: Zırhımız doluyken saldırı değerlidir.
             const armorPercent = p.armor.max > 0 ? p.armor.current / p.armor.max : 0;
             if (armorPercent > 0.9) usefulness = 1.8;
             else usefulness = 1.2;
         } else {
-            let currentStat = 0;
-            if (isRock) currentStat = p.rock.currentDEF;
-            else if (isPaper) currentStat = p.paper.currentDEF;
-            else if (isScissor) currentStat = p.scissor.currentDEF;
-
-            if (currentStat < p.armor.max) usefulness = 1.5; 
-            else usefulness = 0.8;
+            // DEFANS İÇİN: (Burada düzeltme yapıyoruz)
+            // Gelecekteki Defans Değeri = Şu anki + Eşyadan Gelen
+            const futureDef = currentStat + val;
+            
+            // Eğer gelecekteki defans, Max Armor kapasitemizi aşıyorsa bu İSRAFTIR.
+            if (futureDef > p.armor.max) {
+                // OVERKILL CEZASI: Puanı çöp seviyesine indir (x0.1)
+                // Bu eşya, +1 eşya muamelesi görür.
+                usefulness = 0.1; 
+                this.logger.warn(`⚠️ OVERKILL: Defans (${futureDef}) > Max Armor (${p.armor.max}). Puan kırıldı.`);
+            } 
+            else if (futureDef === p.armor.max) {
+                // Tam dolduruyorsa mükemmeldir.
+                usefulness = 1.6;
+            }
+            else {
+                // Hâlâ yer varsa iyidir.
+                usefulness = 1.5; 
+            }
         }
 
         const powerValue = Math.pow(val, 2);
-        
-        // --- DÜZELTİLMİŞ FORMÜL ---
-        // Artık mermi sayısıyla değil, sabit katsayıyla çarpıyoruz.
-        // Mermi sayısı sadece %20'lik bir bonus veya ceza yaratır.
-        const WEAPON_BASE_MULTIPLIER = 45; 
+        const POTENTIAL_FACTOR = 18; 
 
-        let chargeBonus = 1.0;
-        let myCharges = 0;
-        if (isRock) myCharges = p.rock.currentCharges;
-        else if (isPaper) myCharges = p.paper.currentCharges;
-        else if (isScissor) myCharges = p.scissor.currentCharges;
+        let baseScore = 0;
+        if (charges > 0) {
+            const effectiveCharges = Math.min(charges, 5);
+            baseScore = powerValue * POTENTIAL_FACTOR * effectiveCharges * buildMultiplier * usefulness + (currentStat * 2);
+        } else {
+            baseScore = powerValue * POTENTIAL_FACTOR * buildMultiplier * usefulness;
+        }
 
-        if (myCharges >= 3) chargeBonus = 1.2; 
-        else if (myCharges <= 0) chargeBonus = 0.8;
-
-        let finalScore = powerValue * WEAPON_BASE_MULTIPLIER * buildMultiplier * usefulness * chargeBonus;
-
-        // Mevcut stat bonusu (Stacking - hafif etki)
-        let currentStatVal = isAtk 
-            ? (isRock ? p.rock.currentATK : (isPaper ? p.paper.currentATK : p.scissor.currentATK))
-            : (isRock ? p.rock.currentDEF : (isPaper ? p.paper.currentDEF : p.scissor.currentDEF));
-            
-        finalScore += (currentStatVal * 2);
-
-        return finalScore * lowTierPenalty;
+        return baseScore * lowTierPenalty;
     }
 
     return 0;
