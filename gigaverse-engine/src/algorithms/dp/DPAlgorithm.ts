@@ -156,61 +156,73 @@ export class DPAlgorithm implements IGigaverseAlgorithm {
         return (val1 * 120) + jackpot;
     }
 
-    // === DURUM D: SİLAH GELİŞTİRMELERİ ===
+    // === DURUM D: SİLAH GELİŞTİRMELERİ (DÜZELTİLMİŞ MATEMATİK) ===
     if (isRock || isPaper || isScissor) {
         const isAtk = val1 > 0;
         const val = isAtk ? val1 : val2;
 
         // +1 Çöp Filtresi (Yumuşak Ceza)
-        // Eğer +1 ise puanı %90 kırpılır. +2 Can (300 Puan) karşısında şansı kalmaz.
         let lowTierPenalty = 1.0;
         if (val === 1) lowTierPenalty = 0.1; 
 
-        let charges = 0;
-        let currentStat = 0;
+        // Build Çarpanları
         let buildMultiplier = 1.0;
-
-        // DOĞRU EŞLEŞTİRME
-        if (isRock) {
-            charges = p.rock.currentCharges;
-            currentStat = isAtk ? p.rock.currentATK : p.rock.currentDEF;
+        if (isRock) { // Sword (Favori)
             buildMultiplier = 1.5; 
-        } else if (isPaper) {
-            charges = p.paper.currentCharges;
-            currentStat = isAtk ? p.paper.currentATK : p.paper.currentDEF;
+        } else if (isPaper) { // Shield (Favori)
             buildMultiplier = 1.5; 
-        } else if (isScissor) {
-            charges = p.scissor.currentCharges;
-            currentStat = isAtk ? p.scissor.currentATK : p.scissor.currentDEF;
+        } else if (isScissor) { // Spell (Zayıf)
             buildMultiplier = 0.7; 
         }
 
-        // Doygunluk Kontrolü (Zırh doluysa defans alma, saldırı al)
+        // Zırh/Saldırı Stratejisi (Usefulness)
         let usefulness = 1.0;
         if (isAtk) {
             const armorPercent = p.armor.max > 0 ? p.armor.current / p.armor.max : 0;
-            if (armorPercent > 0.9) usefulness = 1.8; // Zırh dolu, Saldırı Modu
+            // Zırh doluyken saldırı çok daha değerlidir
+            if (armorPercent > 0.9) usefulness = 1.8;
             else usefulness = 1.2;
         } else {
             // Defans eşyası
+            let currentStat = 0;
+            if (isRock) currentStat = p.rock.currentDEF;
+            else if (isPaper) currentStat = p.paper.currentDEF;
+            else if (isScissor) currentStat = p.scissor.currentDEF;
+
+            // Zırh kapasitemizden düşükse defans almak mantıklıdır
             if (currentStat < p.armor.max) usefulness = 1.5; 
             else usefulness = 0.8;
         }
 
-        const powerValue = Math.pow(val, 2);
-        // POTANSİYEL HESABI (Mermiden Bağımsız Değer - Yatırımcı Modu)
-        const POTENTIAL_FACTOR = 18; 
+        const powerValue = Math.pow(val, 2); // Gücün Karesi (Önemli)
+        
+        // --- DÜZELTİLMİŞ FORMÜL ---
+        // Eskiden (18 * 5 = 90) ile çarpıyorduk, çok fazlaydı.
+        // Şimdi standart bir "45" katsayısı ile çarpıyoruz.
+        // +2 Kılıç = 4 * 45 * 1.5 = 270 Puan. (+2 Can 300 Puan olduğu için CAN KAZANIR ✅)
+        // +3 Kılıç = 9 * 45 * 1.5 = 607 Puan. (Çok güçlü silah, +2 Canı geçer ama +4 Canı geçemez ✅)
+        
+        const WEAPON_BASE_MULTIPLIER = 45; 
 
-        // Hesaplama
-        let baseScore = 0;
-        if (charges > 0) {
-            const effectiveCharges = Math.min(charges, 5);
-            baseScore = powerValue * POTENTIAL_FACTOR * effectiveCharges * buildMultiplier * usefulness + (currentStat * 2);
-        } else {
-            baseScore = powerValue * POTENTIAL_FACTOR * buildMultiplier;
-        }
+        // Ayrıca mermimiz çoksa ufak bir "Bonus" ekleyelim, ana çarpan yapmayalım.
+        let chargeBonus = 1.0;
+        let myCharges = 0;
+        if (isRock) myCharges = p.rock.currentCharges;
+        else if (isPaper) myCharges = p.paper.currentCharges;
+        else if (isScissor) myCharges = p.scissor.currentCharges;
 
-        return baseScore * lowTierPenalty;
+        if (myCharges >= 3) chargeBonus = 1.2; // Full mermim varsa bu silahı daha çok isterim
+
+        let finalScore = powerValue * WEAPON_BASE_MULTIPLIER * buildMultiplier * usefulness * chargeBonus;
+
+        // Mevcut stat bonusu (Stacking - hafif etki)
+        let currentStatVal = isAtk 
+            ? (isRock ? p.rock.currentATK : (isPaper ? p.paper.currentATK : p.scissor.currentATK))
+            : (isRock ? p.rock.currentDEF : (isPaper ? p.paper.currentDEF : p.scissor.currentDEF));
+            
+        finalScore += (currentStatVal * 2);
+
+        return finalScore * lowTierPenalty;
     }
 
     // Bilinmeyen eşya
