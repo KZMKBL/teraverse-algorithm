@@ -49,12 +49,12 @@ export class DPAlgorithm implements IGigaverseAlgorithm {
   public pickAction(state: GigaverseRunState): GigaverseAction {
     this.memo.clear();
     
-    // LOOT PHASE: Saf Kural Modu (Simulation-Free)
+    // LOOT PHASE: Sadece Kurallar (Simulation Free)
     if (state.lootPhase) {
         return this.pickBestLoot(state);
     }
 
-    // COMBAT PHASE: Expectimax
+    // COMBAT PHASE: Expectimax Simülasyonu
     const result = this.expectimaxSearch(state, this.config.maxHorizon);
     
     if (!result.bestAction) {
@@ -88,80 +88,71 @@ export class DPAlgorithm implements IGigaverseAlgorithm {
       }
   }
 
-  // --- FINAL CLEAN VERSION: SADECE GERÇEK ID KONTROLÜ ---
+  // --- PUANLAMA MOTORU (ENFLASYON KORUMALI) ---
   private getLootSynergyScore(state: GigaverseRunState, loot: any): number {
     const p = state.player;
-    // SDK'dan gelen gerçek ID (Örn: "AddMaxHealth", "UpgradeRock")
-    // Kesinlikle küçük harfe çevirmiyoruz veya içinde kelime aramıyoruz.
+    // SDK ID'si (Kesin Eşleşme)
     const type = loot.boonTypeString; 
     
     const val1 = loot.selectedVal1 || 0;
     const val2 = loot.selectedVal2 || 0;
 
     switch (type) {
-        // =====================================================
+        // -----------------------------------------------------
         // 1. HEAL (İKSİR)
-        // =====================================================
+        // -----------------------------------------------------
         case "Heal": {
             const current = p.health.current;
             const max = p.health.max;
             const missing = max - current;
 
-            // Can zaten full veya fulle çok yakınsa (-Sonsuz Puan)
-            if (missing < 1) return -999999;
-            
-            // Can %90 üzerindeyse alma
+            if (missing < 1) return -999999; 
             if (current / max > 0.90) return -5000;
 
-            const healAmount = val1;
-            const effectiveHeal = Math.min(missing, healAmount);
-            
-            // Aciliyet Hesabı
+            const effectiveHeal = Math.min(missing, val1);
             const hpPercent = current / max;
             let urgency = 1;
-            if (hpPercent < 0.30) urgency = 50;      // ÖLÜM KALIM
-            else if (hpPercent < 0.50) urgency = 10; // İHTİYAÇ
+            if (hpPercent < 0.30) urgency = 50;      
+            else if (hpPercent < 0.50) urgency = 10; 
             
             return effectiveHeal * urgency * 5;
         }
 
-        // =====================================================
-        // 2. MAX HEALTH (TIER S)
-        // =====================================================
+        // -----------------------------------------------------
+        // 2. MAX HEALTH (TIER S) - KATSAYI 200
+        // -----------------------------------------------------
         case "AddMaxHealth": {
-            // "AddMaxHealth" stringi "Heal" stringi ile asla karışmaz.
             let jackpot = 0;
             if (val1 >= 4) jackpot = 500;
             
-            // +2 Health = 300 Puan.
-            // +4 Health = 600 + Jackpot(500) = 1100 Puan.
-            return (val1 * 150) + jackpot;
+            // +2 Can = 400 Puan
+            return (val1 * 200) + jackpot;
         }
 
-        // =====================================================
-        // 3. MAX ARMOR (TIER S)
-        // =====================================================
+        // -----------------------------------------------------
+        // 3. MAX ARMOR (TIER S) - KATSAYI 180
+        // -----------------------------------------------------
         case "AddMaxArmor": {
             let jackpot = 0;
             if (val1 >= 3) jackpot = 400;
             
-            // +2 Armor = 240 Puan.
-            return (val1 * 120) + jackpot;
+            // +2 Zırh = 360 Puan
+            return (val1 * 180) + jackpot;
         }
 
-        // =====================================================
-        // 4. SİLAH GELİŞTİRMELERİ
-        // =====================================================
-        case "UpgradeRock":    // Sword
-        case "UpgradePaper":   // Shield
-        case "UpgradeScissor": // Spell
+        // -----------------------------------------------------
+        // 4. SİLAH GELİŞTİRMELERİ (BASE 10 - DÜŞÜK ENFLASYON)
+        // -----------------------------------------------------
+        case "UpgradeRock":    
+        case "UpgradePaper":   
+        case "UpgradeScissor": 
         {
             const isAtk = val1 > 0;
             const val = isAtk ? val1 : val2;
 
-            // +1 Çöp Filtresi (Sert Ceza)
+            // +1 ÇÖP FİLTRESİ: %95 Puan Silme
             let lowTierPenalty = 1.0;
-            if (val === 1) lowTierPenalty = 0.05; // Puanı %95 sil
+            if (val === 1) lowTierPenalty = 0.05; 
 
             let charges = 0;
             let currentStat = 0;
@@ -181,30 +172,27 @@ export class DPAlgorithm implements IGigaverseAlgorithm {
                 buildMultiplier = 0.7; 
             }
 
-            // Doygunluk ve Strateji Kontrolü
+            // USEFULNESS (Zırh Taşma Kontrolü)
             let usefulness = 1.0;
             if (isAtk) {
                 const armorPercent = p.armor.max > 0 ? p.armor.current / p.armor.max : 0;
-                if (armorPercent > 0.9) usefulness = 1.8; // Zırh dolu, Saldır
+                if (armorPercent > 0.9) usefulness = 1.8; 
                 else usefulness = 1.2;
             } else {
-                // Defans eşyası
-                // Gelecekteki Defans Değeri = Şu anki + Eşyadan Gelen
                 const futureDef = currentStat + val;
-                
-                // OVERKILL KONTROLÜ: Zırh kapasitesini aşıyorsa çöp et
+                // OVERKILL CHECK
                 if (futureDef > p.armor.max) {
-                    usefulness = 0.1; 
+                    usefulness = 0.1; // Çöp
                 } else if (futureDef === p.armor.max) {
-                    usefulness = 1.6; // Tam dolduruyor
+                    usefulness = 1.6; // Mükemmel
                 } else {
                     usefulness = 1.5; // Lazım
                 }
             }
 
             const powerValue = Math.pow(val, 2);
-            // Düşürülmüş Çarpan (Enflasyon Önlemi)
-            const WEAPON_BASE_MULTIPLIER = 25; 
+            // ENFLASYON AYARI: 45 -> 10'a düşürüldü.
+            const WEAPON_BASE_MULTIPLIER = 10; 
 
             let baseScore = 0;
             if (charges > 0) {
@@ -217,15 +205,12 @@ export class DPAlgorithm implements IGigaverseAlgorithm {
             return baseScore * lowTierPenalty;
         }
 
-        // =====================================================
-        // 5. BİLİNMEYEN
-        // =====================================================
         default:
-            return 0; // Tanımadığın şeyi alma
+            return 0; 
     }
   }
 
-  // --- EXPECTIMAX (SAVAŞ) ---
+  // --- SAVAŞ MOTORU ---
   private expectimaxSearch(state: GigaverseRunState, depth: number): DPResult {
     if (depth <= 0 || state.player.health.current <= 0 || state.currentEnemyIndex >= state.enemies.length) {
       return { bestValue: this.config.evaluateFn(state), bestAction: null };
