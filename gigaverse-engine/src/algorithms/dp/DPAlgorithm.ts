@@ -191,15 +191,17 @@ export class DPAlgorithm implements IGigaverseAlgorithm {
             }
 
             const powerValue = Math.pow(val, 2);
-            // ENFLASYON AYARI: 45 -> 10'a düşürüldü.
-            const WEAPON_BASE_MULTIPLIER = 10; 
+            // INFLATION FIX: Base multiplier reduced to 30.
+            const WEAPON_BASE_MULTIPLIER = 30; 
 
             let baseScore = 0;
             if (charges > 0) {
-                const effectiveCharges = Math.min(charges, 5);
+                // Charge Cap: Max 3 charges considered (Game Rule)
+                const effectiveCharges = Math.min(charges, 3);
                 baseScore = powerValue * WEAPON_BASE_MULTIPLIER * effectiveCharges * buildMultiplier * usefulness + (currentStat * 2);
             } else {
-                baseScore = powerValue * WEAPON_BASE_MULTIPLIER * buildMultiplier;
+                // Potential Value: Treat as if we have 1.5 charges
+                baseScore = powerValue * WEAPON_BASE_MULTIPLIER * 1.5 * buildMultiplier;
             }
 
             return baseScore * lowTierPenalty;
