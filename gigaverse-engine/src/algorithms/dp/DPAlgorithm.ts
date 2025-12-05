@@ -291,23 +291,63 @@ export class DPAlgorithm implements IGigaverseAlgorithm {
       return MoveType.SCISSOR;
   }
 
- // --- FINAL DÜZELTİLMİŞ LOOT SİNERJİ MANTIĞI (UZUN VADELİ YATIRIMCI) ---
+// --- DEBUG MODLU LOOT SEÇİCİ ---
+  private pickBestLoot(state: GigaverseRunState): GigaverseAction {
+      let bestScore = -Infinity;
+      let bestIdx = 0;
+
+      this.logger.info("--- LOOT SEÇİM EKRANI BAŞLADI ---");
+      this.logger.info(`Can: ${state.player.health.current}/${state.player.health.max}, Zırh: ${state.player.armor.current}/${state.player.armor.max}`);
+
+      for(let i=0; i < state.lootOptions.length; i++) {
+          const loot = state.lootOptions[i];
+          const score = this.getLootSynergyScore(state, loot); // Puanı hesapla
+          
+          // KONSOLA YAZDIRIYORUZ: Hangi eşyaya kaç puan verdi?
+          const name = loot.boonTypeString || "???";
+          const val1 = loot.selectedVal1;
+          const val2 = loot.selectedVal2;
+          this.logger.info(`[SEÇENEK ${i}] İsim: "${name}" | Değerler: ${val1}/${val2} => VERİLEN PUAN: ${score.toFixed(1)}`);
+
+          if(score > bestScore) {
+              bestScore = score;
+              bestIdx = i;
+          }
+      }
+
+      this.logger.info(`>>> KAZANAN: Seçenek ${bestIdx} (Puan: ${bestScore.toFixed(1)})`);
+      this.logger.info("-----------------------------------");
+
+      switch(bestIdx) {
+          case 0: return { type: GigaverseActionType.PICK_LOOT_ONE };
+          case 1: return { type: GigaverseActionType.PICK_LOOT_TWO };
+          case 2: return { type: GigaverseActionType.PICK_LOOT_THREE };
+          case 3: return { type: GigaverseActionType.PICK_LOOT_FOUR };
+          default: return { type: GigaverseActionType.PICK_LOOT_ONE };
+      }
+  }
+
+  // --- DEBUG MODLU PUANLAMA ---
   private getLootSynergyScore(state: GigaverseRunState, loot: any): number {
     const p = state.player;
     const rawType = (loot.boonTypeString || "").toString();
     const t = rawType.toLowerCase();
 
-    // 1. TİP AYRIŞTIRMA (KESİN REFERANS)
+    // TİP TANIMLAMA LOGLARI (Bunu sadece hatayı bulana kadar açık tut)
+    // this.logger.debug(`Analiz ediliyor: ${rawType}`);
+
+    // 1. TİP AYRIŞTIRMA
     const isMaxHP = t.includes("maxhealth") || t.includes("addmaxhp") || (t.includes("health") && (t.includes("max") || t.includes("upg") || t.includes("add")));
-    const isArmor = t.includes("maxarmor") || t.includes("armor");
+    const isArmor = t.includes("maxarmor") || t.includes("armor"); // Armor Upgrade
     const isHeal = (t.includes("heal") || t.includes("potion")) && !isMaxHP && !isArmor;
 
     const isRock = t.includes("rock") || t.includes("sword") || t.includes("blade");
-    const isPaper = t.includes("paper") || (t.includes("shield") && !t.includes("max"));
+    const isPaper = t.includes("paper") || (t.includes("shield") && !t.includes("max") && !t.includes("armor"));
     const isScissor = t.includes("scissor") || t.includes("spell") || t.includes("magic");
 
-    // === DURUM A: HEAL (İYİLEŞTİRME) ===
+    // === DURUM A: HEAL ===
     if (isHeal) {
+        // this.logger.debug(`-> TİP: HEAL ALGILANDI`);
         const current = p.health.current;
         const max = p.health.max;
         const missing = max - current;
@@ -326,47 +366,52 @@ export class DPAlgorithm implements IGigaverseAlgorithm {
         return effectiveHeal * urgency * 5;
     }
 
-    // === DURUM B: MAX HEALTH (TIER S) ===
+    // === DURUM B: MAX HEALTH ===
     if (isMaxHP) {
+        // this.logger.debug(`-> TİP: MAX HEALTH ALGILANDI`);
         const val = loot.selectedVal1 || 0;
         let jackpot = 0;
         if (val >= 4) jackpot = 500;
         return (val * 150) + jackpot;
     }
 
-    // === DURUM C: MAX ARMOR (TIER S) ===
+    // === DURUM C: MAX ARMOR ===
     if (isArmor) {
+        // this.logger.debug(`-> TİP: MAX ARMOR ALGILANDI`);
         const val = loot.selectedVal1 || 0;
         let jackpot = 0;
         if (val >= 3) jackpot = 400;
         return (val * 120) + jackpot;
     }
 
-    // === DURUM D: SİLAH GELİŞTİRMELERİ (YATIRIMCI MODU) ===
+    // === DURUM D: SİLAH GELİŞTİRMELERİ ===
     if (isRock || isPaper || isScissor) {
+        // this.logger.debug(`-> TİP: SİLAH ALGILANDI`);
         const isAtk = (loot.selectedVal1 || 0) > 0;
         const val = isAtk ? loot.selectedVal1 : loot.selectedVal2;
 
-        // +1 Çöp Filtresi
         let lowTierPenalty = 1.0;
         if (val === 1) lowTierPenalty = 0.1; 
 
+        let charges = 0;
         let currentStat = 0;
         let buildMultiplier = 1.0;
 
-        // Build Tercihleri
         if (isRock) { // Sword
+            charges = p.rock.currentCharges;
             currentStat = isAtk ? p.rock.currentATK : p.rock.currentDEF;
             buildMultiplier = 1.5; 
         } else if (isPaper) { // Shield
+            charges = p.paper.currentCharges;
             currentStat = isAtk ? p.paper.currentATK : p.paper.currentDEF;
             buildMultiplier = 1.5; 
         } else if (isScissor) { // Spell
+            charges = p.scissor.currentCharges;
             currentStat = isAtk ? p.scissor.currentATK : p.scissor.currentDEF;
             buildMultiplier = 0.7; 
         }
 
-        // Doygunluk Kontrolü
+        // Usefulness
         let usefulness = 1.0;
         if (isAtk) {
             const armorPercent = p.armor.max > 0 ? p.armor.current / p.armor.max : 0;
@@ -378,20 +423,16 @@ export class DPAlgorithm implements IGigaverseAlgorithm {
         }
 
         const powerValue = Math.pow(val, 2);
-        
-        // --- KRİTİK DEĞİŞİKLİK: POTANSİYEL HESABI ---
-        // Eskiden: charges * 4 ile çarpıyorduk. Mermi 0 ise puan ölüyordu.
-        // Şimdi: Sabit 'POTENTIAL_FACTOR' (18) ile çarpıyoruz.
-        // Mermi sayısı artık ana faktör değil, sadece ufak bir "Aciliyet Bonusu" (Tie-breaker).
-        
-        const POTENTIAL_FACTOR = 18; // Sanki hep 4.5 mermimiz varmış gibi değerli gör.
-        
-        // Formül: Güç^2 * 18 * Build * Usefulness + (MevcutStat * 2)
+        const POTENTIAL_FACTOR = 18;
+
         let finalScore = powerValue * POTENTIAL_FACTOR * buildMultiplier * usefulness + (currentStat * 2);
 
+        // this.logger.debug(`-> Silah Hesabı: Val=${val}, Pen=${lowTierPenalty}, Score=${finalScore}`);
         return finalScore * lowTierPenalty;
     }
 
+    // Bilinmeyen eşya
+    this.logger.warn(`-> TİP: TANIMLANAMADI! Raw: "${rawType}"`);
     return 0;
   }
 
