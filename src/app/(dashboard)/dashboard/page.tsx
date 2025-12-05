@@ -30,6 +30,14 @@ import { RunRecapPanel } from '@/app/(dashboard)/_components/run-recap-panel'
 import { RomManagerPanel } from '@/app/(dashboard)/_components/rom-manager-panel'
 import { RunTabsPanel } from '@/app/(dashboard)/_components/run-tabs-panel'
 
+// --- ÖZEL LOGGER (BOTUN SESİNİ AÇIYORUZ) ---
+const browserLogger = {
+  info: (msg: string) => console.log(`%c[BOT] ${msg}`, 'color: #00ffff; font-weight: bold;'), // Camgöbeği
+  warn: (msg: string) => console.warn(`[BOT WARN] ${msg}`),
+  error: (msg: string) => console.error(`[BOT ERROR] ${msg}`),
+  debug: (msg: string) => console.log(`%c[DEBUG] ${msg}`, 'color: #aaaaaa; font-style: italic;'), // Gri
+}
+
 export default function DashboardPage() {
   const { bearerToken } = useAuthStore()
   const {
@@ -103,7 +111,9 @@ export default function DashboardPage() {
         algoRefs.current.minimax = new MinimaxAlgorithm({ maxDepth: 3 }, silentLogger)
         break
       case 'dp':
-        algoRefs.current.dp = new DPAlgorithm({ maxHorizon: 4 }, silentLogger)
+        // BURAYI DEĞİŞTİRDİK: silentLogger yerine browserLogger kullanıyoruz!
+        // Ayrıca maxHorizon'u 6'ya çıkardık (Hız yaması sayesinde).
+        algoRefs.current.dp = new DPAlgorithm({ maxHorizon: 6 }, browserLogger)
         break
       case 'greedy':
         algoRefs.current.greedy = new GreedyAlgorithm({ atkWeight: 2.0 }, silentLogger)
