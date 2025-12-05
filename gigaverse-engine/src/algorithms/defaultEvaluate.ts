@@ -1,77 +1,85 @@
 // path: gigaverse-engine/src/algorithms/defaultEvaluate.ts
 
-import { GigaverseRunState } from "../simulator/GigaverseTypes";
+import { GigaverseRunState, GigaverseFighter, GigaverseMoveState } from "../simulator/GigaverseTypes";
 
 /**
  * Evaluates the state to give a numeric score.
  * Higher is better.
- * Used by Expectimax to decide which future is brighter.
+ * Includes "Threat Assessment" and "Ammo Efficiency".
  */
 export function defaultEvaluate(state: GigaverseRunState): number {
   const p = state.player;
   const e = state.enemies[state.currentEnemyIndex];
 
-  // 1. ÖLÜM KONTROLÜ (EN KRİTİK)
-  // Eğer öldüysek, dünyanın en kötü puanını verelim.
-  // 0 vermek yetmez, çünkü bazen 0 puanlı "idare eder" durumlar olabilir.
+  // 1. ÖLÜM KONTROLÜ (GAME OVER)
   if (p.health.current <= 0) return -1000000;
 
-  // Başlangıç puanı
   let score = 0;
 
-  // 2. İLERLEME PUANI (LEVEL ATLAMA)
-  // Her düşman öldürmek devasa bir başarıdır.
-  // Bunu diğer faktörlerden (can, zırh) daha değerli kılmalıyız.
-  score += state.currentEnemyIndex * 50000;
+  // 2. İLERLEME VE KAZANMA (VICTORY)
+  // Düşmanı yenmek her şeyden önemlidir.
+  score += state.currentEnemyIndex * 100000; 
+
+  // Eğer mevcut düşman öldüyse ekstra devasa bonus (Round'u bitirmeyi teşvik et)
+  if (!e || e.health.current <= 0) {
+      score += 50000;
+      // Düşman öldüyse diğer hesaplara girmeye gerek yok, kazanmak en iyisidir.
+      // Sadece kendi canımızı ekleyip dönüyoruz.
+      return score + (p.health.current * 100); 
+  }
 
   // 3. OYUNCU SAĞLIĞI (SURVIVAL)
-  // Oran (Ratio) yerine Mutlak Değer (Absolute) kullanıyoruz.
-  // Çünkü 100/100 HP, 10/10 HP'den çok daha iyidir.
-  score += p.health.current * 100;      // Her 1 HP = 100 Puan
-  score += p.armor.current * 50;        // Her 1 Zırh = 50 Puan
+  // Can her şeydir. Zırh ise canın koruyucusudur.
+  score += p.health.current * 200;  // Can puanını artırdım (Agresiflikten ölmesin)
+  score += p.armor.current * 50;    // Zırh puanı
 
-  // 4. DÜŞMAN DURUMU (AGGRESSION)
-  // Expectimax'ın "Düşmana vurmak iyidir" diyebilmesi için bu şart.
-  if (e && e.health.current > 0) {
-      // Düşmanın canı ne kadar AZ ise o kadar iyi.
-      // Toplam Canından kalan canı çıkarıp, verdiğimiz hasarı ödüllendiriyoruz.
-      const damageDealt = e.health.max - e.health.current;
-      score += damageDealt * 100; // Düşmana vurulan her hasar +100 puan
+  // 4. DÜŞMAN DURUMU (KILLER INSTINCT)
+  // Düşmanın canını ne kadar azalttık?
+  const damageDealt = e.health.max - e.health.current;
+  score += damageDealt * 150; // Agresiflik (Düşmana vurmak iyidir)
 
-      // Düşmanın zırhını kırmak da taktiksel avantajdır.
-      const armorBroken = e.armor.max - e.armor.current;
-      score += armorBroken * 40;
-  } else if (!e || e.health.current <= 0) {
-      // Düşman öldüyse veya yoksa ekstra bonus (Level geçiş anı)
-      score += 20000;
+  const armorBroken = e.armor.max - e.armor.current;
+  score += armorBroken * 50;  // Zırh kırmak taktiksel avantajdır
+
+  // 5. OYUNCU EKONOMİSİ (AMMO CURVE)
+  // "Diminishing Returns" mantığı: 0->1 mermi çok değerli, 2->3 mermi az değerli.
+  const myMoves = [p.rock, p.paper, p.scissor];
+  let myTotalStats = 0;
+
+  for (const m of myMoves) {
+      myTotalStats += m.currentATK + m.currentDEF;
+
+      // Mermi Cezaları
+      if (m.currentCharges === -1) score -= 800; // Ceza (Çok Kötü)
+      else if (m.currentCharges === 0) score -= 150; // Hafif Ceza (Savunmasızlık)
+
+      // Mermi Ödülleri (Kademeli)
+      if (m.currentCharges === 1) score += 100;      // İlk mermi hayati!
+      else if (m.currentCharges === 2) score += 140; // İkinci mermi iyi (+40 fark)
+      else if (m.currentCharges >= 3) score += 160;  // Full şarj lüks (+20 fark)
   }
+  // Stat gücü (Gelecek yatırımı)
+  score += myTotalStats * 40;
 
-  // 5. GÜÇ VE POTANSİYEL (ECONOMY)
-  // Statlarımıza (ATK/DEF) ve Mermilerimize (Charges) puan verelim.
-  // Böylece bot "Şu an vuramıyorum ama şarj dolduruyorum" diyebilsin.
-  
-  const moves = [p.rock, p.paper, p.scissor];
-  let totalStats = 0;
-  let penalty = 0;
 
-  for (const m of moves) {
-      // Statların toplam gücü (Geleceğe yatırım)
-      totalStats += m.currentATK + m.currentDEF;
+  // 6. DÜŞMAN TEHDİT ANALİZİ (DEFENSIVE IQ)
+  // Düşmanın ne kadar tehlikeli olduğu puanımızı düşürmeli.
+  // Düşmanın mermisi yoksa puanımız artmalı (tehdit azaldı).
+  const enemyMoves = [e.rock, e.paper, e.scissor];
+  let threatScore = 0;
 
-      // Mermi Yönetimi:
-      // Mermimiz 0 ise kötü, -1 ise çok kötü.
-      if (m.currentCharges === -1) penalty += 500; // Ceza
-      else if (m.currentCharges === 0) penalty += 100; // Hafif Ceza
-      
-      // Mermi biriktirmek iyidir (Max 3'e kadar)
-      if (m.currentCharges > 0) score += m.currentCharges * 20;
+  for (const em of enemyMoves) {
+      // Düşmanın elinde mermi varsa ve silahı güçlüyse, bu bir TEHDİTTİR.
+      if (em.currentCharges > 0) {
+          // Tehdit = (Saldırı Gücü) * (Mermi Varlığı)
+          // Bu puanı total skordan düşeceğiz.
+          // Yani: Düşmanın mermisini bitiren hamleler daha yüksek puan alacak.
+          threatScore += (em.currentATK * 20); 
+      }
   }
-
-  // Statlar kalıcı olduğu için çarpanı yüksek tutuyoruz.
-  score += totalStats * 50; 
   
-  // Cezayı düşüyoruz
-  score -= penalty;
+  // Tehdidi skordan düş (Düşmanı silahsız bırakmak iyidir)
+  score -= threatScore;
 
   return score;
 }
