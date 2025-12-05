@@ -49,12 +49,12 @@ export class DPAlgorithm implements IGigaverseAlgorithm {
   public pickAction(state: GigaverseRunState): GigaverseAction {
     this.memo.clear();
     
-    // LOOT PHASE: Sadece Kurallar (Simulation Free)
+    // --- 1. LOOT FAZI: SAF MANTIK (Simülasyon YOK) ---
     if (state.lootPhase) {
         return this.pickBestLoot(state);
     }
 
-    // COMBAT PHASE: Expectimax Simülasyonu
+    // --- 2. SAVAŞ FAZI: EXPECTIMAX ---
     const result = this.expectimaxSearch(state, this.config.maxHorizon);
     
     if (!result.bestAction) {
@@ -73,6 +73,9 @@ export class DPAlgorithm implements IGigaverseAlgorithm {
           const loot = state.lootOptions[i];
           const score = this.getLootSynergyScore(state, loot);
           
+          // Debug için log (tarayıcı konsolunda görebilirsin)
+          this.logger.info(`Loot ${i}: ${loot.boonTypeString} (+${loot.selectedVal1}|+${loot.selectedVal2}) => Puan: ${score.toFixed(1)}`);
+
           if(score > bestScore) {
               bestScore = score;
               bestIdx = i;
@@ -88,131 +91,151 @@ export class DPAlgorithm implements IGigaverseAlgorithm {
       }
   }
 
-  // --- PUANLAMA MOTORU (ENFLASYON KORUMALI) ---
+  // --- PUANLAMA MOTORU (HYBRID MATCHING) ---
   private getLootSynergyScore(state: GigaverseRunState, loot: any): number {
     const p = state.player;
-    // SDK ID'si (Kesin Eşleşme)
-    const type = loot.boonTypeString; 
+    const rawType = (loot.boonTypeString || "").toString();
+    const t = rawType.toLowerCase();
     
     const val1 = loot.selectedVal1 || 0;
     const val2 = loot.selectedVal2 || 0;
 
-    switch (type) {
-        // -----------------------------------------------------
-        // 1. HEAL (İKSİR)
-        // -----------------------------------------------------
-        case "Heal": {
-            const current = p.health.current;
-            const max = p.health.max;
-            const missing = max - current;
+    // ------------------------------------------------------------------
+    // 1. TİP AYRIŞTIRMA (ÖNCELİK SIRASI ÇOK ÖNEMLİ)
+    // ------------------------------------------------------------------
 
-            if (missing < 1) return -999999; 
-            if (current / max > 0.90) return -5000;
+    // A. MAX HEALTH (En üst öncelik, Heal ile karışmasın diye)
+    // Hem ID (AddMaxHealth) hem de İsim (Health Upgrade) kontrolü yapıyoruz.
+    const isMaxHP = 
+        rawType === "AddMaxHealth" || 
+        t.includes("health upgrade") || 
+        t.includes("addmaxhealth") ||
+        (t.includes("health") && (t.includes("max") || t.includes("add")));
 
-            const effectiveHeal = Math.min(missing, val1);
-            const hpPercent = current / max;
-            let urgency = 1;
-            if (hpPercent < 0.30) urgency = 50;      
-            else if (hpPercent < 0.50) urgency = 10; 
-            
-            return effectiveHeal * urgency * 5;
-        }
+    // B. MAX ARMOR
+    const isArmor = 
+        rawType === "AddMaxArmor" || 
+        t.includes("armor upgrade") || 
+        t.includes("addmaxarmor") ||
+        (t.includes("armor") && (t.includes("max") || t.includes("add")));
 
-        // -----------------------------------------------------
-        // 2. MAX HEALTH (TIER S) - KATSAYI 200
-        // -----------------------------------------------------
-        case "AddMaxHealth": {
-            let jackpot = 0;
-            if (val1 >= 4) jackpot = 500;
-            
-            // +2 Can = 400 Puan
-            return (val1 * 200) + jackpot;
-        }
+    // C. HEAL (İKSİR)
+    // "Heal" kelimesi geçecek AMA yukarıdaki MaxHP veya MaxArmor olmayacak.
+    const isHeal = 
+        (rawType === "Heal" || t === "heal" || t.includes("potion")) && 
+        !isMaxHP && !isArmor;
 
-        // -----------------------------------------------------
-        // 3. MAX ARMOR (TIER S) - KATSAYI 180
-        // -----------------------------------------------------
-        case "AddMaxArmor": {
-            let jackpot = 0;
-            if (val1 >= 3) jackpot = 400;
-            
-            // +2 Zırh = 360 Puan
-            return (val1 * 180) + jackpot;
-        }
+    // D. SİLAHLAR
+    const isRock = rawType === "UpgradeRock" || t.includes("sword") || t.includes("rock") || t.includes("blade");
+    const isPaper = rawType === "UpgradePaper" || t.includes("shield") || t.includes("paper");
+    const isScissor = rawType === "UpgradeScissor" || t.includes("spell") || t.includes("magic") || t.includes("scissor");
 
-        // -----------------------------------------------------
-        // 4. SİLAH GELİŞTİRMELERİ (BASE 10 - DÜŞÜK ENFLASYON)
-        // -----------------------------------------------------
-        case "UpgradeRock":    
-        case "UpgradePaper":   
-        case "UpgradeScissor": 
-        {
-            const isAtk = val1 > 0;
-            const val = isAtk ? val1 : val2;
+    // ------------------------------------------------------------------
+    // 2. PUANLAMA MANTIĞI
+    // ------------------------------------------------------------------
 
-            // +1 ÇÖP FİLTRESİ: %95 Puan Silme
-            let lowTierPenalty = 1.0;
-            if (val === 1) lowTierPenalty = 0.05; 
-
-            let charges = 0;
-            let currentStat = 0;
-            let buildMultiplier = 1.0;
-
-            if (type === "UpgradeRock") {
-                charges = p.rock.currentCharges;
-                currentStat = isAtk ? p.rock.currentATK : p.rock.currentDEF;
-                buildMultiplier = 1.5; 
-            } else if (type === "UpgradePaper") {
-                charges = p.paper.currentCharges;
-                currentStat = isAtk ? p.paper.currentATK : p.paper.currentDEF;
-                buildMultiplier = 1.5; 
-            } else if (type === "UpgradeScissor") {
-                charges = p.scissor.currentCharges;
-                currentStat = isAtk ? p.scissor.currentATK : p.scissor.currentDEF;
-                buildMultiplier = 0.7; 
-            }
-
-            // USEFULNESS (Zırh Taşma Kontrolü)
-            let usefulness = 1.0;
-            if (isAtk) {
-                const armorPercent = p.armor.max > 0 ? p.armor.current / p.armor.max : 0;
-                if (armorPercent > 0.9) usefulness = 1.8; 
-                else usefulness = 1.2;
-            } else {
-                const futureDef = currentStat + val;
-                // OVERKILL CHECK
-                if (futureDef > p.armor.max) {
-                    usefulness = 0.1; // Çöp
-                } else if (futureDef === p.armor.max) {
-                    usefulness = 1.6; // Mükemmel
-                } else {
-                    usefulness = 1.5; // Lazım
-                }
-            }
-
-            const powerValue = Math.pow(val, 2);
-            // INFLATION FIX: Base multiplier reduced to 30.
-            const WEAPON_BASE_MULTIPLIER = 30; 
-
-            let baseScore = 0;
-            if (charges > 0) {
-                // Charge Cap: Max 3 charges considered (Game Rule)
-                const effectiveCharges = Math.min(charges, 3);
-                baseScore = powerValue * WEAPON_BASE_MULTIPLIER * effectiveCharges * buildMultiplier * usefulness + (currentStat * 2);
-            } else {
-                // Potential Value: Treat as if we have 1.5 charges
-                baseScore = powerValue * WEAPON_BASE_MULTIPLIER * 1.5 * buildMultiplier;
-            }
-
-            return baseScore * lowTierPenalty;
-        }
-
-        default:
-            return 0; 
+    // === DURUM: MAX HEALTH (TIER S) ===
+    if (isMaxHP) {
+        let jackpot = 0;
+        if (val1 >= 4) jackpot = 500;
+        
+        // +2 Health = 2 * 200 = 400 Puan.
+        return (val1 * 200) + jackpot;
     }
+
+    // === DURUM: MAX ARMOR (TIER A) ===
+    if (isArmor) {
+        let jackpot = 0;
+        if (val1 >= 3) jackpot = 400;
+        
+        // +2 Armor = 2 * 180 = 360 Puan.
+        return (val1 * 180) + jackpot;
+    }
+
+    // === DURUM: HEAL (İKSİR) ===
+    if (isHeal) {
+        const current = p.health.current;
+        const max = p.health.max;
+        const missing = max - current;
+
+        // Can zaten full (-Sonsuz)
+        if (missing < 1) return -999999;
+        // Can %90 üzerindeyse alma
+        if (current / max > 0.90) return -5000;
+
+        const effectiveHeal = Math.min(missing, val1);
+        
+        // Aciliyet Hesabı
+        const hpPercent = current / max;
+        let urgency = 1;
+        if (hpPercent < 0.30) urgency = 50;      // ÖLÜM KALIM
+        else if (hpPercent < 0.50) urgency = 10; // İHTİYAÇ
+        
+        return effectiveHeal * urgency * 5;
+    }
+
+    // === DURUM: SİLAH GELİŞTİRMELERİ ===
+    if (isRock || isPaper || isScissor) {
+        const isAtk = val1 > 0;
+        const val = isAtk ? val1 : val2;
+
+        // +1 ÇÖP FİLTRESİ (SERT CEZA)
+        let lowTierPenalty = 1.0;
+        if (val === 1) lowTierPenalty = 0.05; // Puanı %95 sil
+
+        let charges = 0;
+        let currentStat = 0;
+        let buildMultiplier = 1.0;
+
+        if (isRock) {
+            charges = p.rock.currentCharges;
+            currentStat = isAtk ? p.rock.currentATK : p.rock.currentDEF;
+            buildMultiplier = 1.5; // Favori
+        } else if (isPaper) {
+            charges = p.paper.currentCharges;
+            currentStat = isAtk ? p.paper.currentATK : p.paper.currentDEF;
+            buildMultiplier = 1.5; // Favori
+        } else if (isScissor) {
+            charges = p.scissor.currentCharges;
+            currentStat = isAtk ? p.scissor.currentATK : p.scissor.currentDEF;
+            buildMultiplier = 0.7; // Zayıf
+        }
+
+        // DOYGUNLUK KONTROLÜ
+        let usefulness = 1.0;
+        if (isAtk) {
+            const armorPercent = p.armor.max > 0 ? p.armor.current / p.armor.max : 0;
+            if (armorPercent > 0.9) usefulness = 1.8; // Zırh dolu, Saldır
+            else usefulness = 1.2;
+        } else {
+            // Defans eşyası
+            if (currentStat < p.armor.max) usefulness = 1.5; // Lazım
+            else usefulness = 0.8;
+        }
+
+        const powerValue = Math.pow(val, 2);
+        // MATEMATİK DENGELEMESİ
+        // +2 Silah (Buildli) = 4 * 20 * 1.5 * 1.2 = ~144 Puan. (Max HP 400 Puan kazanır)
+        // +3 Silah (Buildli) = 9 * 20 * 1.5 * 1.5 = ~400 Puan. (Max HP ile yarışır)
+        const WEAPON_BASE_MULTIPLIER = 20; 
+
+        let baseScore = 0;
+        if (charges > 0) {
+            const effectiveCharges = Math.min(charges, 3); // Max 3 mermi etkisi
+            baseScore = powerValue * WEAPON_BASE_MULTIPLIER * effectiveCharges * buildMultiplier * usefulness + (currentStat * 2);
+        } else {
+            baseScore = powerValue * WEAPON_BASE_MULTIPLIER * 1.5 * buildMultiplier;
+        }
+
+        return baseScore * lowTierPenalty;
+    }
+
+    // Tanımlanamayan Eşya
+    // Bunu 0 yapıyoruz ki +1 Kılıç (Puanı ~2-5) bile olsa, hiç tanımadığı şeye tercih etsin.
+    return 0;
   }
 
-  // --- SAVAŞ MOTORU ---
+  // --- SAVAŞ MOTORU (SABİT) ---
   private expectimaxSearch(state: GigaverseRunState, depth: number): DPResult {
     if (depth <= 0 || state.player.health.current <= 0 || state.currentEnemyIndex >= state.enemies.length) {
       return { bestValue: this.config.evaluateFn(state), bestAction: null };
