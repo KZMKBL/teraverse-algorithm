@@ -45,41 +45,39 @@ export class DPAlgorithm implements IGigaverseAlgorithm {
     this.logger = logger ?? defaultLogger;
     this.memo = new Map();
     
-    // Başlangıç logunu da kapattım, sadece loot odaklı olalım.
+    // Başlangıç logunu kapattık
   }
 
   public pickAction(state: GigaverseRunState): GigaverseAction {
     this.memo.clear();
     
-    // --- SADECE BURADA KONUŞACAK (LOOT PHASE) ---
+    // --- SADECE BURADA LOG BASACAK (LOOT PHASE) ---
     if (state.lootPhase) {
         return this.pickBestLoot(state);
     }
 
-    // --- SAVAŞ MODU (TAMAMEN SESSİZ) ---
+    // --- SAVAŞ MODU (SESSİZ) ---
     const result = this.expectimaxSearch(state, this.config.maxHorizon);
     
     if (!result.bestAction) {
       return { type: GigaverseActionType.MOVE_ROCK };
     }
     
-    // Savaş hamlelerini loglamıyoruz artık.
     return result.bestAction;
   }
 
-  // --- LOOT SEÇİMİ (DEDEKTİF MODU - SADECE GEREKLİ DETAYLAR) ---
+  // --- LOOT SEÇİMİ (DEDEKTİF MODU - KONUŞKAN) ---
   private pickBestLoot(state: GigaverseRunState): GigaverseAction {
       let bestScore = -Infinity;
       let bestIdx = 0;
 
       const p = state.player;
       
-      // Sadece Loot ekranı gelince bu blok çalışır ve konsola düşer
       this.logger.info(`\n📦 --- LOOT ZAMANI --- [Can: ${p.health.current}/${p.health.max}]`);
 
       for(let i=0; i < state.lootOptions.length; i++) {
           const loot = state.lootOptions[i];
-          const score = this.getLootSynergyScore(state, loot); // Puanı hesapla (İçeride detay logu var)
+          const score = this.getLootSynergyScore(state, loot); 
           
           if(score > bestScore) {
               bestScore = score;
@@ -87,7 +85,6 @@ export class DPAlgorithm implements IGigaverseAlgorithm {
           }
       }
 
-      // Kazananı belirgin şekilde yaz
       const winnerName = state.lootOptions[bestIdx]?.boonTypeString || "???";
       const winnerVal1 = state.lootOptions[bestIdx]?.selectedVal1;
       const winnerVal2 = state.lootOptions[bestIdx]?.selectedVal2;
@@ -103,7 +100,7 @@ export class DPAlgorithm implements IGigaverseAlgorithm {
       }
   }
 
-  // --- PUANLAMA MOTORU (DETAYLI ANALİZ) ---
+  // --- PUANLAMA MOTORU (DETAYLI ANALİZ LOGLARI) ---
   private getLootSynergyScore(state: GigaverseRunState, loot: any): number {
     const p = state.player;
     const rawType = (loot.boonTypeString || "").toString();
@@ -178,7 +175,6 @@ export class DPAlgorithm implements IGigaverseAlgorithm {
         const isAtk = val1 > 0;
         const val = isAtk ? val1 : val2;
 
-        // +1 Çöp Filtresi
         let lowTierPenalty = 1.0;
         let note = "";
         if (val === 1) {
@@ -230,7 +226,6 @@ export class DPAlgorithm implements IGigaverseAlgorithm {
         return finalScore;
     }
 
-    // Bilinmeyen eşya
     this.logger.warn(`   ❓ BİLİNMEYEN: "${rawType}" -> Puan: 0`);
     return 0;
   }
@@ -279,6 +274,7 @@ export class DPAlgorithm implements IGigaverseAlgorithm {
 
       for (const enemyMove of enemyMoves) {
           const nextState = this.fastClone(state);
+          // FİZİK MOTORU BURADA (VE SESSİZ)
           this.applyRoundOutcome(nextState, myMove, enemyMove);
 
           const nextEnemy = nextState.enemies[nextState.currentEnemyIndex];
@@ -292,12 +288,12 @@ export class DPAlgorithm implements IGigaverseAlgorithm {
       return totalWeightedScore;
   }
 
-  // --- PERFORMANS YAMASI (FAST CLONE) ---
+  // --- HIZLI KOPYALAMA ---
   private fastClone(state: GigaverseRunState): GigaverseRunState {
       return JSON.parse(JSON.stringify(state));
   }
 
-  // --- FİZİK MOTORU ---
+  // --- SESSİZ FİZİK MOTORU (LOGSUZ) ---
   private applyRoundOutcome(state: GigaverseRunState, pMove: MoveType, eMove: MoveType) {
       const p = state.player;
       const e = state.enemies[state.currentEnemyIndex];
@@ -384,7 +380,6 @@ export class DPAlgorithm implements IGigaverseAlgorithm {
       return MoveType.SCISSOR;
   }
 
-  // --- HAFIZA ANAHTARI ---
   private buildStateKey(state: GigaverseRunState, depth: number): string {
     const p = state.player;
     const e = state.enemies[state.currentEnemyIndex]; 
