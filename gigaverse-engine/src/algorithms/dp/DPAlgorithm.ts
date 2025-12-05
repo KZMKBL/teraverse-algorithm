@@ -291,42 +291,34 @@ export class DPAlgorithm implements IGigaverseAlgorithm {
       return MoveType.SCISSOR;
   }
 
- // --- FINAL FIX v2: KELİME ÇAKIŞMASI VE PARSING DÜZELTMESİ ---
+ // --- FINAL KESİN LOOT MANTIĞI (LOOT FORMATTER UYUMLU) ---
   private getLootSynergyScore(state: GigaverseRunState, loot: any): number {
     const p = state.player;
-    // Güvenlik: Stringe çevir ve küçük harf yap
+    // SDK'dan gelen ham string (Örn: "UpgradeRock", "AddMaxHealth")
     const rawType = (loot.boonTypeString || "").toString();
+    
+    // Görüntülenen isim (Eğer simülatör dönüşüm yapmışsa diye önlem)
     const t = rawType.toLowerCase();
 
     // ---------------------------------------------------------
-    // 1. TİP AYRIŞTIRMA (ÇAKIŞMALARI ÖNLEME MODU)
+    // 1. TİP AYRIŞTIRMA (KESİN REFERANS)
+    // lootFormatter.ts dosyasındaki mapping'e göre birebir kontrol
     // ---------------------------------------------------------
 
-    // HEAL KONTROLÜ (KRİTİK DÜZELTME):
-    // "heal" veya "potion" içermeli.
-    // AMA "health" kelimesinin içinde de "heal" geçtiği için, 
-    // içinde "health" VEYA "max" VEYA "upgrade" geçiyorsa bu BİR HEAL DEĞİLDİR!
-    const containsHealKeyword = t.includes("heal") || t.includes("potion");
-    const isNotStatUpgrade = !t.includes("health") && !t.includes("max") && !t.includes("upgrade") && !t.includes("add");
-    const isHeal = containsHealKeyword && isNotStatUpgrade;
+    // MAX HEALTH: "AddMaxHealth" veya ekranda görünen "Health Upgrade"
+    const isMaxHP = rawType === "AddMaxHealth" || t.includes("health upgrade") || t.includes("addmaxhealth");
 
-    // MAX HEALTH:
-    // "health" veya "vitality" veya "hp" geçiyorsa bu can artışıdır.
-    // (Yukarıda Heal'i elediğimiz için artık güvenle "health" diyebiliriz)
-    const isMaxHP = t.includes("health") || t.includes("vitality") || t.includes("hp") || t.includes("addmax");
+    // MAX ARMOR: "AddMaxArmor" veya ekranda görünen "Armor Upgrade"
+    const isArmor = rawType === "AddMaxArmor" || t.includes("armor upgrade") || t.includes("addmaxarmor");
 
-    // MAX ARMOR:
-    // "armor" geçiyorsa zırhtır.
-    const isArmor = t.includes("armor") || t.includes("shieldmax");
+    // HEAL: "Heal" (Sadece ve sadece bu string)
+    // "Health Upgrade" içindeki 'heal' kelimesiyle karışmaması için isMaxHP kontrolü şart.
+    const isHeal = (rawType === "Heal" || t === "heal") && !isMaxHP;
 
-    // SİLAHLAR:
-    const isRock = t.includes("rock") || t.includes("sword") || t.includes("blade") || t.includes("axe");
-    
-    // Paper (Shield Item): "Shield" geçecek AMA "Armor" geçmeyecek (Armor Upgrade ile karışmasın)
-    const isPaper = (t.includes("shield") && !isArmor) || t.includes("paper");
-    
-    // Scissor (Spell): "Spell", "Magic", "Scissor", "Wand"
-    const isScissor = t.includes("scissor") || t.includes("spell") || t.includes("magic") || t.includes("wand") || t.includes("mana");
+    // SİLAHLAR (Mapping: Rock->Sword, Paper->Shield, Scissor->Spell)
+    const isRock = rawType === "UpgradeRock" || t.includes("sword");
+    const isPaper = rawType === "UpgradePaper" || t.includes("shield");
+    const isScissor = rawType === "UpgradeScissor" || t.includes("spell");
 
     // ---------------------------------------------------------
     // 2. PUANLAMA MANTIĞI
@@ -338,8 +330,9 @@ export class DPAlgorithm implements IGigaverseAlgorithm {
         const max = p.health.max;
         const missing = max - current;
 
-        // Can zaten full veya fulle yakınsa (-Sonsuz Puan)
-        if (missing < 2) return -999999;
+        // Can zaten full veya fulle çok yakınsa (-Sonsuz Puan)
+        if (missing < 1) return -999999;
+        
         // Can %90 üzerindeyse alma
         if (current / max > 0.90) return -5000;
 
@@ -355,7 +348,7 @@ export class DPAlgorithm implements IGigaverseAlgorithm {
         return effectiveHeal * urgency * 5;
     }
 
-    // === DURUM B: MAX HEALTH (TIER S) ===
+    // === DURUM B: MAX HEALTH (Health Upgrade) - TIER S ===
     if (isMaxHP) {
         const val = loot.selectedVal1 || 0;
         // PUANLAR:
@@ -367,7 +360,7 @@ export class DPAlgorithm implements IGigaverseAlgorithm {
         return (val * 150) + jackpot;
     }
 
-    // === DURUM C: MAX ARMOR (TIER S) ===
+    // === DURUM C: MAX ARMOR (Armor Upgrade) - TIER S ===
     if (isArmor) {
         const val = loot.selectedVal1 || 0;
         // +2 Armor = 240 Puan.
@@ -383,10 +376,8 @@ export class DPAlgorithm implements IGigaverseAlgorithm {
         const val = isAtk ? loot.selectedVal1 : loot.selectedVal2;
 
         // --- YUMUŞAK CEZA (SOFT PENALTY) ---
-        // Eğer değer 1 ise puanı 0.1 ile çarp (Çok düşür).
-        // Böylece +1 Kılıç (Puanı 30 -> 3) olur. 
-        // Ama tanınmayan eşya (0 puan) yerine yine de bunu seçer.
-        // Fakat Health Upgrade (300 puan) gelirse şansı kalmaz.
+        // +1 Eşyaları neredeyse yok sayıyoruz (0.1 Katsayı).
+        // Böylece +1 Kılıç (Puanı ~3), +2 Can'ı (Puanı 300) asla yenemez.
         let lowTierPenalty = 1.0;
         if (val === 1) lowTierPenalty = 0.1; 
 
@@ -394,15 +385,16 @@ export class DPAlgorithm implements IGigaverseAlgorithm {
         let currentStat = 0;
         let buildMultiplier = 1.0;
 
-        if (isRock) {
+        // DOĞRU EŞLEŞTİRME: Rock=Sword, Paper=Shield, Scissor=Spell
+        if (isRock) { // Sword
             charges = p.rock.currentCharges;
             currentStat = isAtk ? p.rock.currentATK : p.rock.currentDEF;
             buildMultiplier = 1.5; 
-        } else if (isPaper) {
+        } else if (isPaper) { // Shield
             charges = p.paper.currentCharges;
             currentStat = isAtk ? p.paper.currentATK : p.paper.currentDEF;
             buildMultiplier = 1.5; 
-        } else if (isScissor) {
+        } else if (isScissor) { // Spell
             charges = p.scissor.currentCharges;
             currentStat = isAtk ? p.scissor.currentATK : p.scissor.currentDEF;
             buildMultiplier = 0.7; 
@@ -434,7 +426,7 @@ export class DPAlgorithm implements IGigaverseAlgorithm {
         return finalScore * lowTierPenalty;
     }
 
-    // Bilinmeyen eşya (Artık 0 puan veriyoruz ki yanlışlıkla seçilmesin)
+    // Bilinmeyen eşya
     return 0;
   }
 
