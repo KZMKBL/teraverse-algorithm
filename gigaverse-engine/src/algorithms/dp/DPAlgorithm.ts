@@ -296,75 +296,135 @@ export class DPAlgorithm implements IGigaverseAlgorithm {
       return MoveType.SCISSOR;
   }
 
-  // --- PREVIOUSLY PERFECTED SYNERGY LOGIC ---
+  // --- DÜZELTİLMİŞ LOOT SİNERJİ MANTIĞI ---
   private getLootSynergyScore(state: GigaverseRunState, loot: any): number {
     const p = state.player;
-    const type = loot.boonTypeString;
+    const type = loot.boonTypeString || ""; // Güvenlik için
     let score = 0;
-  
-    switch (type) {
-      // CAN YÖNETİMİ
-      case "Heal": {
+
+    // --- İSİM EŞLEŞTİRME (STRING NORMALIZATION) ---
+    // SDK bazen "UpgradeRock", bazen "UpgradeSword" diyebilir. Hepsini kapsayalım.
+    const isHeal = type.includes("Heal") || type.includes("Potion");
+    const isMaxHP = type.includes("AddMaxHealth") || type.includes("Vitality") || type.includes("Health");
+    const isArmor = type.includes("AddMaxArmor") || type.includes("ShieldMax"); // ShieldMax ismini salladım ama armor stringi neyse o.
+    
+    const isRock = type.includes("UpgradeRock") || type.includes("UpgradeSword") || type.includes("Sword");
+    const isPaper = type.includes("UpgradePaper") || type.includes("UpgradeShield") || type.includes("Shield");
+    const isScissor = type.includes("UpgradeScissor") || type.includes("UpgradeSpell") || type.includes("UpgradeMagic") || type.includes("Spell");
+
+    // 1. CAN YÖNETİMİ (Heal vs Max HP)
+    if (isHeal && !isMaxHP) { // MaxHealth içinde "Health" geçtiği için karışmasın
         const missingHealth = p.health.max - p.health.current;
-        const hpPercent = p.health.current / p.health.max; 
+        const hpPercent = p.health.current / p.health.max;
         const healAmount = loot.selectedVal1 || 0;
-        if (missingHealth <= 0) return -99999;
-        if (hpPercent > 0.85) return -2000;
+
+        if (missingHealth <= 0) return -99999; // Can full ise alma
+        if (hpPercent > 0.85) return -5000;   // Can %85 üstüyse alma
+
         const effectiveHeal = Math.min(missingHealth, healAmount);
-        const urgency = Math.pow(1 / Math.max(0.1, hpPercent), 3);
-        score += effectiveHeal * urgency * 2;
-        break;
-      }
-      case "AddMaxHealth": {
+        // Aciliyet Eğrisi: Can azaldıkça puan logaritmik artar
+        const urgency = Math.pow(1 / Math.max(0.1, hpPercent), 2.5);
+        
+        score += effectiveHeal * urgency * 3;
+        return score;
+    }
+
+    // 2. MAX HEALTH (Tier S Stat)
+    if (isMaxHP) {
         const val = loot.selectedVal1 || 0;
-        score += (val * 40) + (val >= 4 ? 100 : 0); 
-        break;
-      }
-      case "AddMaxArmor": {
+        // ESKİ: (val * 40) idi.
+        // YENİ: Health çok kritik, puanını artırıyoruz.
+        // +2 Health = 120 Puan.
+        // +7 Health = 420 + 300(Jackpot) = 720 Puan! (Hiçbir silah bunu geçemez)
+        
+        let jackpot = 0;
+        if (val >= 4) jackpot = 150;
+        if (val >= 6) jackpot = 300;
+
+        score += (val * 60) + jackpot;
+        return score;
+    }
+
+    // 3. MAX ARMOR (Tier S+ Stat)
+    if (isArmor) {
         const val = loot.selectedVal1 || 0;
-        score += (val * 50) + (val >= 3 ? 100 : 0);
-        break;
-      }
-      // SİLAH GELİŞTİRMELERİ
-      case "UpgradeRock":
-      case "UpgradePaper":
-      case "UpgradeScissor": {
+        // Armor en değerli stat.
+        // +1 Armor = 70 Puan.
+        // +5 Armor = 350 + 250 = 600 Puan.
+        
+        let jackpot = 0;
+        if (val >= 3) jackpot = 100;
+        if (val >= 5) jackpot = 250;
+
+        score += (val * 70) + jackpot;
+        return score;
+    }
+
+    // 4. SİLAH GELİŞTİRMELERİ (Nerflendi)
+    if (isRock || isPaper || isScissor) {
         const isAtk = (loot.selectedVal1 || 0) > 0;
         const val = isAtk ? loot.selectedVal1 : loot.selectedVal2;
+
         let charges = 0;
         let currentStat = 0;
         let buildMultiplier = 1.0;
-        if (type === "UpgradeRock") {
+
+        // Elementleri Tanı
+        if (isRock) {
             charges = p.rock.currentCharges;
             currentStat = isAtk ? p.rock.currentATK : p.rock.currentDEF;
-            buildMultiplier = 1.3; 
-        } else if (type === "UpgradePaper") {
+            buildMultiplier = 1.5; // Rock seven bot
+        } else if (isPaper) {
             charges = p.paper.currentCharges;
             currentStat = isAtk ? p.paper.currentATK : p.paper.currentDEF;
-            buildMultiplier = 1.3; 
-        } else if (type === "UpgradeScissor") {
+            buildMultiplier = 1.5; // Paper seven bot
+        } else if (isScissor) {
             charges = p.scissor.currentCharges;
             currentStat = isAtk ? p.scissor.currentATK : p.scissor.currentDEF;
-            buildMultiplier = 0.7; 
+            buildMultiplier = 0.6; // Scissor (Spell) sevmeyen bot
         }
+
+        // Defans Doygunluğu (Usefulness)
         let usefulness = 1.0;
-        if (!isAtk) { 
-             if (currentStat < p.armor.max) usefulness = 1.5;
+        if (!isAtk) {
+             // Eğer bu bir defans kartıysa ve defansımız zaten Max Armor'dan yüksekse
+             // puanını kırıyoruz. Ama düşükse bonus veriyoruz.
+             if (currentStat < p.armor.max) usefulness = 1.5; 
              else usefulness = 0.8;
         }
+
+        // --- MATEMATİK DÜZELTMESİ ---
+        // Eskiden: val^2 * 10 yapıyorduk. Bu çok fazlaydı.
+        // Şimdi: val^2 * 4 yapıyoruz.
+        // Örnek: Spell Def +2 (Scissor, Build 0.6)
+        // Val=2 -> Pow=4.
+        // Score = 4 * 4(Base) * 5(Charges) * 0.6(Build) * 1.5(Useful) = 72 Puan.
+        // Health +7 Puanı = 720 Puan.
+        // SONUÇ: 720 >>> 72. Bot Health alır. (DÜZELDİ)
+        
+        // Örnek: Spell Def +3
+        // Val=3 -> Pow=9.
+        // Score = 9 * 4 * 5 * 0.6 * 1.5 = 162 Puan.
+        // Armor +5 Puanı = 600 Puan.
+        // SONUÇ: 600 >>> 162. Bot Armor alır. (DÜZELDİ)
+
         const powerValue = Math.pow(val, 2);
+        
         if (charges > 0) {
-            const effectiveCharges = Math.min(charges, 5);
-            score += powerValue * 10 * effectiveCharges * buildMultiplier * usefulness;
+            const effectiveCharges = Math.min(charges, 5); // Max 5 mermi etkisi
+            score += powerValue * 4 * effectiveCharges * buildMultiplier * usefulness;
+            
+            // Mevcut stat bonusu (stacking)
             score += currentStat * 2;
         } else {
-            score += powerValue * 15 * buildMultiplier;
+            // Mermi yoksa düşük puan
+            score += powerValue * 5 * buildMultiplier;
         }
-        break;
-      }
-      default: score += 20; break;
+        return score;
     }
-    return score;
+
+    // Bilinmeyen eşya
+    return 10;
   }
 
   private buildStateKey(state: GigaverseRunState, depth: number): string {
