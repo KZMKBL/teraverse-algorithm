@@ -137,62 +137,122 @@ export class DPAlgorithm implements IGigaverseAlgorithm {
   
     switch (type) {
       // ---------------------------------------------------------
-      // 1. CAN YÖNETİMİ (Heal vs Max HP Dengesi)
+      // 1. CAN YÖNETİMİ (Artık "Matematiksel Eğri" kullanıyor)
       // ---------------------------------------------------------
       case "Heal": {
         const missingHealth = p.health.max - p.health.current;
         const hpPercent = p.health.current / p.health.max; 
         const healAmount = loot.selectedVal1 || 0;
   
-        // Can %75 üzeriyse ASLA Heal alma.
-        if (hpPercent > 0.75) return -1000; 
-        // Can %60 üzeriyse Heal alma, çok kötü bir seçenek değilse.
-        if (hpPercent > 0.60) return -100; 
+        // KURAL 1: Can Full ise, kainatın en iyi iksiri de olsa ALMA.
+        if (missingHealth <= 0) return -99999;
         
-        if (missingHealth <= 0) return -5000;
-  
+        // KURAL 2: Can %85 üzerindeyse Heal alma, israf etme.
+        if (hpPercent > 0.85) return -2000;
+
         const effectiveHeal = Math.min(missingHealth, healAmount);
         
-        // Aciliyet: Can %40 altıysa panik modu.
-        let urgency = 1;
-        if (hpPercent < 0.40) urgency = 10; 
-        else urgency = 2;
-  
-        score += effectiveHeal * urgency;
+        // --- DİNAMİK ACİLİYET EĞRİSİ ---
+        // Eskiden: "Can %40 altıysa x10 yap". (Sınır sorunu vardı)
+        // Şimdi: (1 / CanYüzdesi)^3 formülü.
+        // Örnek: Can %100 -> Katsayı 1
+        // Örnek: Can %50  -> Katsayı 8
+        // Örnek: Can %43 (13/30) -> Katsayı ~12.5 (Çok Yüksek!)
+        // Örnek: Can %20  -> Katsayı 125 (PANİK!)
+        
+        const urgency = Math.pow(1 / Math.max(0.1, hpPercent), 3);
+        
+        // Temel Puan: (Heal Miktarı * Aciliyet * 2)
+        score += effectiveHeal * urgency * 2;
         break;
       }
   
       case "AddMaxHealth": {
         const val = loot.selectedVal1 || 0;
-        
-        // --- TIER BONUSU (YENİ) ---
-        // +2 Health iyidir, ama +4 Health MUHTEŞEMDİR.
-        // Düz mantık (val * 40) yerine, büyük sayılara ekstra ödül veriyoruz.
-        let rarityBonus = 0;
-        if (val >= 4) rarityBonus = 100; // +4 ve üzeri gelirse kaçırma!
-        
-        // Base puan: 40. (+2 Health = 80 Puan)
-        // +4 Health = 160 + 100 = 260 Puan (Sword +2'yi ezer geçer)
-        score += (val * 40) + rarityBonus; 
+        // Max HP kalıcı olduğu için her zaman sağlam puan verir.
+        // +2 Can = ~100 Puan.
+        // +4 Can = ~250 Puan.
+        score += (val * 40) + (val >= 4 ? 100 : 0); 
         break;
       }
   
       case "AddMaxArmor": {
         const val = loot.selectedVal1 || 0;
-
-        // Armor oyundaki en değerli stat. Base puanı: 45.
-        // +1 Armor = 45 Puan.
-        // +2 Armor = 90 Puan. (Sword +2'yi ucu ucuna geçer)
-        
-        // --- TIER BONUSU ---
-        let rarityBonus = 0;
-        if (val >= 3) rarityBonus = 50;
-        if (val >= 5) rarityBonus = 150; // +5 Armor gelirse her şeyi bırak al.
-
-        // Örnek: +5 Armor = (5*45) + 150 = 375 Puan. (Sword Def +1'in esamesi okunmaz)
-        score += (val * 45) + rarityBonus;
+        // Armor hala kral stat.
+        // +1 Armor = ~50 Puan.
+        // +5 Armor = ~400 Puan.
+        score += (val * 50) + (val >= 3 ? 100 : 0);
         break;
       }
+  
+      // ---------------------------------------------------------
+      // 2. SİLAH GELİŞTİRMELERİ (Karesel Hesaplama)
+      // ---------------------------------------------------------
+      case "UpgradeRock":
+      case "UpgradePaper":
+      case "UpgradeScissor": {
+        const isAtk = (loot.selectedVal1 || 0) > 0;
+        const val = isAtk ? loot.selectedVal1 : loot.selectedVal2;
+  
+        let charges = 0;
+        let currentStat = 0;
+        
+        // --- SİLAH TERCİH DENGESİ ---
+        // Farkı azalttık. Makas artık tamamen ölü değil.
+        let buildMultiplier = 1.0;
+        if (type === "UpgradeRock") {
+            charges = p.rock.currentCharges;
+            currentStat = isAtk ? p.rock.currentATK : p.rock.currentDEF;
+            buildMultiplier = 1.3; // Hafif torpil (Eskisi 2.5 idi)
+        } else if (type === "UpgradePaper") {
+            charges = p.paper.currentCharges;
+            currentStat = isAtk ? p.paper.currentATK : p.paper.currentDEF;
+            buildMultiplier = 1.3; // Hafif torpil
+        } else if (type === "UpgradeScissor") {
+            charges = p.scissor.currentCharges;
+            currentStat = isAtk ? p.scissor.currentATK : p.scissor.currentDEF;
+            buildMultiplier = 0.7; // Hafif ceza (Eskisi 0.1 idi)
+        }
+
+        // --- DEFANS CAP KONTROLÜ ---
+        let usefulness = 1.0;
+        if (!isAtk) { 
+             // Defansımız Max Armor'dan düşükse defans almak çok daha kıymetlidir.
+             if (currentStat < p.armor.max) usefulness = 1.5;
+             else usefulness = 0.8;
+        }
+
+        // --- KARESEL GÜÇ HESABI (YENİ) ---
+        // +1 Stat = 1 Puan
+        // +2 Stat = 4 Puan
+        // +3 Stat = 9 Puan
+        // +4 Stat = 16 Puan
+        // Bu formül sayesinde +3 Makas, +1 Kılıcı matematiksel olarak döver.
+        const powerValue = Math.pow(val, 2);
+
+        if (charges > 0) {
+            // Mermiyi 5 ile sınırladık (Çok abartmasın)
+            const effectiveCharges = Math.min(charges, 5);
+            
+            // Formül: (Güç^2) * 10 * Mermi * Build * Usefulness
+            score += powerValue * 10 * effectiveCharges * buildMultiplier * usefulness;
+            
+            // Stacking Bonusu
+            score += currentStat * 2;
+        } else {
+            // Mermi yoksa base değer
+            score += powerValue * 15 * buildMultiplier;
+        }
+        break;
+      }
+
+      default:
+        score += 20; 
+        break;
+    }
+  
+    return score;
+  }
   
       // ---------------------------------------------------------
       // 2. SİLAH GELİŞTİRMELERİ (Daha Dengeli)
