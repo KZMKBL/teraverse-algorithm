@@ -425,8 +425,25 @@ export class DPAlgorithm implements IGigaverseAlgorithm {
 
   private buildStateKey(state: GigaverseRunState, depth: number): string {
     const p = state.player;
-    // Basit ve hızlı bir key
-    return `${depth}|${state.currentEnemyIndex}|${p.health.current.toFixed(1)}|${p.armor.current}|` +
-           `${p.rock.currentCharges}-${p.paper.currentCharges}-${p.scissor.currentCharges}`;
+    const e = state.enemies[state.currentEnemyIndex]; // Şu an savaştığımız düşman
+    
+    // Düşman yoksa veya öldüyse
+    if (!e || e.health.current <= 0) {
+        return `END|${depth}|${p.health.current}|${state.currentEnemyIndex}`;
+    }
+
+    // OYUNCU DURUMU (Can, Zırh, Mermiler, Statlar)
+    const playerKey = `${p.health.current.toFixed(1)}|${p.armor.current}|` +
+           `${p.rock.currentCharges}-${p.rock.currentATK}-${p.rock.currentDEF}|` +
+           `${p.paper.currentCharges}-${p.paper.currentATK}-${p.paper.currentDEF}|` +
+           `${p.scissor.currentCharges}-${p.scissor.currentATK}-${p.scissor.currentDEF}`;
+
+    // DÜŞMAN DURUMU (Bunu eklemezsek memoization hatalı çalışır!)
+    const enemyKey = `${e.health.current.toFixed(1)}|${e.armor.current}|` +
+           `${e.rock.currentCharges}-${e.rock.currentATK}-${e.rock.currentDEF}|` +
+           `${e.paper.currentCharges}-${e.paper.currentATK}-${e.paper.currentDEF}|` +
+           `${e.scissor.currentCharges}-${e.scissor.currentATK}-${e.scissor.currentDEF}`;
+
+    return `${depth}|${state.currentEnemyIndex}|${playerKey}|VS|${enemyKey}`;
   }
 }
