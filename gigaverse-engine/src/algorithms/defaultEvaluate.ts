@@ -1,56 +1,77 @@
+// path: gigaverse-engine/src/algorithms/defaultEvaluate.ts
+
 import { GigaverseRunState } from "../simulator/GigaverseTypes";
 
+/**
+ * Evaluates the state to give a numeric score.
+ * Higher is better.
+ * Used by Expectimax to decide which future is brighter.
+ */
 export function defaultEvaluate(state: GigaverseRunState): number {
-  const player = state.player;
+  const p = state.player;
+  const e = state.enemies[state.currentEnemyIndex];
 
-  // If player is dead => minimal
-  if (player.health.current <= 0) return 0;
+  // 1. ÖLÜM KONTROLÜ (EN KRİTİK)
+  // Eğer öldüysek, dünyanın en kötü puanını verelim.
+  // 0 vermek yetmez, çünkü bazen 0 puanlı "idare eder" durumlar olabilir.
+  if (p.health.current <= 0) return -1000000;
 
-  // 1) Main scoring: how many enemies we’ve defeated so far
-  const enemiesDefeated = state.currentEnemyIndex;
+  // Başlangıç puanı
+  let score = 0;
 
-  // 2) Reward current HP ratio & armor ratio
-  const hpRatio =
-    player.health.max > 0 ? player.health.current / player.health.max : 0;
-  const armorRatio =
-    player.armor.max > 0 ? player.armor.current / player.armor.max : 0;
+  // 2. İLERLEME PUANI (LEVEL ATLAMA)
+  // Her düşman öldürmek devasa bir başarıdır.
+  // Bunu diğer faktörlerden (can, zırh) daha değerli kılmalıyız.
+  score += state.currentEnemyIndex * 50000;
 
-  // 3) Synergy for top 2 moves
-  //    We look at (ATK + DEF) for each move, identify top 2
-  const moves = [
-    { name: "rock", stats: player.rock },
-    { name: "paper", stats: player.paper },
-    { name: "scissor", stats: player.scissor },
-  ];
-  moves.sort(
-    (a, b) =>
-      b.stats.currentATK +
-      b.stats.currentDEF -
-      (a.stats.currentATK + a.stats.currentDEF)
-  );
-  const [best1, best2] = moves;
+  // 3. OYUNCU SAĞLIĞI (SURVIVAL)
+  // Oran (Ratio) yerine Mutlak Değer (Absolute) kullanıyoruz.
+  // Çünkü 100/100 HP, 10/10 HP'den çok daha iyidir.
+  score += p.health.current * 100;      // Her 1 HP = 100 Puan
+  score += p.armor.current * 50;        // Her 1 Zırh = 50 Puan
 
-  // Simple synergy factor: sum of (ATK+DEF) of best 2 moves * 0.01
-  // Adjust as you like
-  const synergy =
-    (best1.stats.currentATK +
-      best1.stats.currentDEF +
-      best2.stats.currentATK +
-      best2.stats.currentDEF) *
-    0.01;
+  // 4. DÜŞMAN DURUMU (AGGRESSION)
+  // Expectimax'ın "Düşmana vurmak iyidir" diyebilmesi için bu şart.
+  if (e && e.health.current > 0) {
+      // Düşmanın canı ne kadar AZ ise o kadar iyi.
+      // Toplam Canından kalan canı çıkarıp, verdiğimiz hasarı ödüllendiriyoruz.
+      const damageDealt = e.health.max - e.health.current;
+      score += damageDealt * 100; // Düşmana vurulan her hasar +100 puan
 
-  // 4) Penalty for negative charges
-  const negativeChargesCount = moves.filter(
-    (m) => m.stats.currentCharges < 0
-  ).length;
-  const spamPenalty = negativeChargesCount * 0.3;
+      // Düşmanın zırhını kırmak da taktiksel avantajdır.
+      const armorBroken = e.armor.max - e.armor.current;
+      score += armorBroken * 40;
+  } else if (!e || e.health.current <= 0) {
+      // Düşman öldüyse veya yoksa ekstra bonus (Level geçiş anı)
+      score += 20000;
+  }
 
-  // Build final
-  return (
-    enemiesDefeated +
-    hpRatio * 2.0 + // weigh HP strongly
-    armorRatio +
-    synergy -
-    spamPenalty
-  );
+  // 5. GÜÇ VE POTANSİYEL (ECONOMY)
+  // Statlarımıza (ATK/DEF) ve Mermilerimize (Charges) puan verelim.
+  // Böylece bot "Şu an vuramıyorum ama şarj dolduruyorum" diyebilsin.
+  
+  const moves = [p.rock, p.paper, p.scissor];
+  let totalStats = 0;
+  let penalty = 0;
+
+  for (const m of moves) {
+      // Statların toplam gücü (Geleceğe yatırım)
+      totalStats += m.currentATK + m.currentDEF;
+
+      // Mermi Yönetimi:
+      // Mermimiz 0 ise kötü, -1 ise çok kötü.
+      if (m.currentCharges === -1) penalty += 500; // Ceza
+      else if (m.currentCharges === 0) penalty += 100; // Hafif Ceza
+      
+      // Mermi biriktirmek iyidir (Max 3'e kadar)
+      if (m.currentCharges > 0) score += m.currentCharges * 20;
+  }
+
+  // Statlar kalıcı olduğu için çarpanı yüksek tutuyoruz.
+  score += totalStats * 50; 
+  
+  // Cezayı düşüyoruz
+  score -= penalty;
+
+  return score;
 }
