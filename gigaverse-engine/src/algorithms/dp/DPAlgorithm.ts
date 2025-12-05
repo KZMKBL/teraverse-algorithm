@@ -137,51 +137,65 @@ export class DPAlgorithm implements IGigaverseAlgorithm {
   
     switch (type) {
       // ---------------------------------------------------------
-      // 1. CAN YÖNETİMİ (Artık "Tok Gözlü")
+      // 1. CAN YÖNETİMİ (Heal vs Max HP Dengesi)
       // ---------------------------------------------------------
       case "Heal": {
         const missingHealth = p.health.max - p.health.current;
         const hpPercent = p.health.current / p.health.max; 
         const healAmount = loot.selectedVal1 || 0;
   
-        // KURAL 1: Canın %75'in üzerindeyse ASLA Heal alma.
-        // Uzun vadeli yatırımlar (Max HP, Atk) her zaman daha iyidir.
+        // Can %75 üzeriyse ASLA Heal alma.
         if (hpPercent > 0.75) return -1000; 
-
-        // KURAL 2: Canın %60'ın üzerindeyse Heal alma, caydırıcı puan ver.
-        // Ancak diğer seçenekler çok çok kötüyse belki alınabilir.
-        if (hpPercent > 0.60) return -50; 
+        // Can %60 üzeriyse Heal alma, çok kötü bir seçenek değilse.
+        if (hpPercent > 0.60) return -100; 
         
         if (missingHealth <= 0) return -5000;
   
         const effectiveHeal = Math.min(missingHealth, healAmount);
         
-        // Aciliyet sadece can %40 altındaysa devreye girer.
+        // Aciliyet: Can %40 altıysa panik modu.
         let urgency = 1;
-        if (hpPercent < 0.40) urgency = 8; 
-        else urgency = 1.5;
+        if (hpPercent < 0.40) urgency = 10; 
+        else urgency = 2;
   
         score += effectiveHeal * urgency;
         break;
       }
   
       case "AddMaxHealth": {
-        // ESKİ: *25 -> YENİ: *50
-        // +2 Health = 100 Puan. 
-        // Bunu geçmek için +1 Sword (max ~60 puan) yetmez.
-        score += (loot.selectedVal1 || 0) * 50; 
+        const val = loot.selectedVal1 || 0;
+        
+        // --- TIER BONUSU (YENİ) ---
+        // +2 Health iyidir, ama +4 Health MUHTEŞEMDİR.
+        // Düz mantık (val * 40) yerine, büyük sayılara ekstra ödül veriyoruz.
+        let rarityBonus = 0;
+        if (val >= 4) rarityBonus = 100; // +4 ve üzeri gelirse kaçırma!
+        
+        // Base puan: 40. (+2 Health = 80 Puan)
+        // +4 Health = 160 + 100 = 260 Puan (Sword +2'yi ezer geçer)
+        score += (val * 40) + rarityBonus; 
         break;
       }
   
       case "AddMaxArmor": {
-        // Armor hala değerli ama tek başına oyunu kazandırmaz.
-        // +1 Armor = 35 Puan.
-        score += (loot.selectedVal1 || 0) * 35;
+        const val = loot.selectedVal1 || 0;
+
+        // Armor oyundaki en değerli stat. Base puanı: 45.
+        // +1 Armor = 45 Puan.
+        // +2 Armor = 90 Puan. (Sword +2'yi ucu ucuna geçer)
+        
+        // --- TIER BONUSU ---
+        let rarityBonus = 0;
+        if (val >= 3) rarityBonus = 50;
+        if (val >= 5) rarityBonus = 150; // +5 Armor gelirse her şeyi bırak al.
+
+        // Örnek: +5 Armor = (5*45) + 150 = 375 Puan. (Sword Def +1'in esamesi okunmaz)
+        score += (val * 45) + rarityBonus;
         break;
       }
   
       // ---------------------------------------------------------
-      // 2. BUILD STRATEJİSİ & "+1" CEZASI
+      // 2. SİLAH GELİŞTİRMELERİ (Daha Dengeli)
       // ---------------------------------------------------------
       case "UpgradeRock":
       case "UpgradePaper":
@@ -196,45 +210,45 @@ export class DPAlgorithm implements IGigaverseAlgorithm {
         if (type === "UpgradeRock") {
             charges = p.rock.currentCharges;
             currentStat = isAtk ? p.rock.currentATK : p.rock.currentDEF;
-            buildMultiplier = 2.5; // Favori
+            // ESKİ: 2.5 -> YENİ: 1.8 
+            // Torpili azalttık. Artık Armor +2 varken Sword +2'ye atlamaz.
+            buildMultiplier = 1.8; 
         } else if (type === "UpgradePaper") {
             charges = p.paper.currentCharges;
             currentStat = isAtk ? p.paper.currentATK : p.paper.currentDEF;
-            buildMultiplier = 2.5; // Favori
+            // ESKİ: 2.5 -> YENİ: 1.8
+            buildMultiplier = 1.8; 
         } else if (type === "UpgradeScissor") {
             charges = p.scissor.currentCharges;
             currentStat = isAtk ? p.scissor.currentATK : p.scissor.currentDEF;
-            // ESKİ: 0.3 -> YENİ: 0.1 (Scissor'ı tamamen öldürdük)
-            buildMultiplier = 0.1; 
+            buildMultiplier = 0.1; // Scissor hala çöp.
         }
 
-        // --- DOYGUNLUK KONTROLÜ (DEFANS) ---
+        // --- DEFANS CAP KONTROLÜ ---
         let usefulness = 1.0;
         if (!isAtk) { 
             const maxArmor = p.armor.max;
-            // Zırh kapasitemiz dolmadıysa Defans almak çok iyidir
-            if (currentStat < maxArmor) usefulness = 1.5; 
-            else usefulness = 0.8;
+            if (currentStat < maxArmor) usefulness = 1.4; 
+            else usefulness = 0.7;
         }
 
-        // --- "+1 ÇÖPÜ" KONTROLÜ (YENİ) ---
-        // Eğer geliştirme değeri sadece +1 ise, puanını yarıya indir.
-        // Çünkü +1 stat genelde slot israfıdır.
+        // --- "+1 ÇÖPÜ" KONTROLÜ ---
         let lowValuePenalty = 1.0;
-        if (val === 1) lowValuePenalty = 0.5;
+        if (val === 1) lowValuePenalty = 0.5; // +1 ise puanı yarıla.
 
         if (charges > 0) {
+            // Mermi etkisini max 6 ile sınırla.
             const effectiveChargeImpact = Math.min(charges, 6); 
             
-            // Formül: Val * Charges * 5 * Build * Usefulness * Penalty
-            score += val * effectiveChargeImpact * 5 * buildMultiplier * usefulness * lowValuePenalty;
+            // Formül: Val * Charges * 4 (Base) * Build * Usefulness * Penalty
+            // Çarpanı 5'ten 4'e çektim. Silahlar statlara göre bir tık daha az puan versin.
+            score += val * effectiveChargeImpact * 4 * buildMultiplier * usefulness * lowValuePenalty;
             
+            // Mevcut stat bonusu (Stacking)
             score += currentStat * 1 * buildMultiplier;
         } else {
-            // Mermi yoksa base puan (Build Bias burada da geçerli)
-            // Rock/Paper ise (val * 5 * 2.5) = Yüksek
-            // Scissor ise (val * 5 * 0.1) = Çöp
-            score += val * 5 * buildMultiplier * lowValuePenalty;
+            // Mermi yoksa base yatırım puanı
+            score += val * 4 * buildMultiplier * lowValuePenalty;
         }
         break;
       }
