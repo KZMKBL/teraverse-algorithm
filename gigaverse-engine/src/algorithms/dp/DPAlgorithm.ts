@@ -291,12 +291,13 @@ export class DPAlgorithm implements IGigaverseAlgorithm {
       return MoveType.SCISSOR;
   }
 
-  // --- FINAL DÜZELTİLMİŞ LOOT SİNERJİ MANTIĞI (CASE INSENSITIVE) ---
+ // --- FINAL DÜZELTİLMİŞ LOOT SİNERJİ MANTIĞI (+1 STRATEJİSİ EKLENDİ) ---
   private getLootSynergyScore(state: GigaverseRunState, loot: any): number {
     const p = state.player;
     const rawType = (loot.boonTypeString || "").toString();
     const t = rawType.toLowerCase();
 
+    // 1. TİP AYRIŞTIRMA
     const isMaxHP = t.includes("maxhealth") || t.includes("addmaxhp") || (t.includes("health") && t.includes("max"));
     const isArmor = t.includes("maxarmor") || t.includes("armor");
     const isHeal = (t.includes("heal") || t.includes("potion")) && !isMaxHP && !isArmor;
@@ -311,6 +312,7 @@ export class DPAlgorithm implements IGigaverseAlgorithm {
         const max = p.health.max;
         const missing = max - current;
 
+        // Can fulle çok yakınsa alma (-Sonsuz)
         if (missing < 1) return -99999; 
         if (current / max > 0.85) return -5000;
 
@@ -342,12 +344,19 @@ export class DPAlgorithm implements IGigaverseAlgorithm {
         return (val * 60) + jackpot;
     }
 
-    // === DURUM D: SİLAH GELİŞTİRMELERİ ===
+    // === DURUM D: SİLAH GELİŞTİRMELERİ (ARTIK +1 DE HESAPLANIYOR) ===
     if (isRock || isPaper || isScissor) {
         const isAtk = (loot.selectedVal1 || 0) > 0;
         const val = isAtk ? loot.selectedVal1 : loot.selectedVal2;
 
-        if (val === 1) return 1;
+        // --- YUMUŞAK CEZA (SOFT PENALTY) ---
+        // Eskiden direkt "return 1" diyorduk.
+        // Şimdi bir katsayı belirliyoruz. +1 ise puanı yarıya bölüyoruz.
+        // Böylece +1 Kılıç (Puanı 20) vs +1 Makas (Puanı 2) arasında fark oluşuyor.
+        let lowTierPenalty = 1.0;
+        if (val === 1) {
+            lowTierPenalty = 0.5; 
+        }
 
         let charges = 0;
         let currentStat = 0;
@@ -367,20 +376,27 @@ export class DPAlgorithm implements IGigaverseAlgorithm {
             buildMultiplier = 0.7; 
         }
 
+        // Defans Doygunluğu Kontrolü
         let usefulness = 1.0;
         if (!isAtk) {
+             // Zırhımız dolmadıysa Defans almak daha mantıklıdır.
              if (currentStat < p.armor.max) usefulness = 1.5; 
              else usefulness = 0.8;
         }
 
         const powerValue = Math.pow(val, 2);
         
+        let finalScore = 0;
         if (charges > 0) {
             const effectiveCharges = Math.min(charges, 5);
-            return powerValue * 4 * effectiveCharges * buildMultiplier * usefulness + (currentStat * 2);
+            // Formül: Güç * 4 * Mermi * Build * Usefulness
+            finalScore = powerValue * 4 * effectiveCharges * buildMultiplier * usefulness + (currentStat * 2);
         } else {
-            return powerValue * 5 * buildMultiplier;
+            finalScore = powerValue * 5 * buildMultiplier;
         }
+
+        // Ceza veya Ödülü uygula (+1 ise yarı puan)
+        return finalScore * lowTierPenalty;
     }
 
     return 0;
