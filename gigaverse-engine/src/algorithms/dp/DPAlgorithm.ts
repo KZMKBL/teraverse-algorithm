@@ -296,43 +296,52 @@ export class DPAlgorithm implements IGigaverseAlgorithm {
       return MoveType.SCISSOR;
   }
 
-  // --- FINAL DÜZELTİLMİŞ LOOT SİNERJİ MANTIĞI (TRASH FILTER) ---
+  // --- FINAL DÜZELTİLMİŞ LOOT SİNERJİ MANTIĞI (CASE INSENSITIVE) ---
   private getLootSynergyScore(state: GigaverseRunState, loot: any): number {
     const p = state.player;
-    const type = (loot.boonTypeString || "").toString();
+    // Her şeyi küçük harfe çevirip güvenli hale getiriyoruz.
+    const rawType = (loot.boonTypeString || "").toString();
+    const t = rawType.toLowerCase();
 
-    // 1. KESİN AYRIŞTIRMA (STRING FIX)
-    // Önce Max statları belirle.
-    const isMaxHP = type.includes("AddMaxHealth") || type.includes("Vitality") || (type.includes("Health") && !type.includes("Heal")); 
-    // Not: "Heal" kelimesi "Health" içinde yoktur ama tam tersi olabilir diye garantiye aldık.
+    // 1. TİP AYRIŞTIRMA (Hassas ve Kapsayıcı)
     
-    const isArmor = type.includes("AddMaxArmor") || type.includes("ShieldMax") || type.includes("Armor");
+    // Max Health: "maxhealth", "vitality", "hp" (ama "heal" değil)
+    // "AddMaxHealth" -> içinde "maxhealth" var.
+    const isMaxHP = t.includes("maxhealth") || t.includes("addmaxhp") || (t.includes("health") && t.includes("max"));
+    
+    // Max Armor: "maxarmor", "addmaxarmor"
+    const isArmor = t.includes("maxarmor") || t.includes("armor");
 
-    // Heal Kontrolü: İçinde "Heal" veya "Potion" geçecek AMA "Health" veya "Max" geçmeyecek.
-    const isHeal = (type.includes("Heal") || type.includes("Potion")) && !isMaxHP && !isArmor;
+    // Heal: "heal", "potion" (Ama MaxHP değil, Armor değil)
+    const isHeal = (t.includes("heal") || t.includes("potion")) && !isMaxHP && !isArmor;
 
     // Silahlar
-    const isRock = type.includes("UpgradeRock") || type.includes("UpgradeSword") || type.includes("Sword");
-    const isPaper = type.includes("UpgradePaper") || type.includes("UpgradeShield") || type.includes("Shield");
-    const isScissor = type.includes("UpgradeScissor") || type.includes("UpgradeSpell") || type.includes("UpgradeMagic") || type.includes("Spell");
+    const isRock = t.includes("rock") || t.includes("sword") || t.includes("blade");
+    // "Shield" kelimesi hem Zırh hem Kağıt için geçebilir. Genelde "UpgradeShield" silahtır.
+    const isPaper = t.includes("paper") || (t.includes("shield") && !t.includes("max"));
+    const isScissor = t.includes("scissor") || t.includes("spell") || t.includes("magic");
 
     // === DURUM A: HEAL (İYİLEŞTİRME) ===
     if (isHeal) {
-        const hpPercent = p.health.current / p.health.max;
-        const healAmount = loot.selectedVal1 || 0;
+        const current = p.health.current;
+        const max = p.health.max;
+        const missing = max - current;
 
-        // Can %95 üzeriyse -Sonsuz (Asla alma)
-        if (hpPercent >= 0.95) return -Infinity;
-        // Can %80 üzeriyse çok büyük ceza
-        if (hpPercent > 0.80) return -5000;
-
-        const missingHealth = p.health.max - p.health.current;
-        const effectiveHeal = Math.min(missingHealth, healAmount);
+        // KURAL: Eğer eksik can 1'den azsa (neredeyse full), -Sonsuz Puan.
+        if (missing < 1) return -99999; 
         
+        // KURAL: Can %85 üzeriyse, yine de alma (Başka şeyler al).
+        if (current / max > 0.85) return -5000;
+
+        const healAmount = loot.selectedVal1 || 0;
+        const effectiveHeal = Math.min(missing, healAmount);
+        
+        // Aciliyet Eğrisi
+        const hpPercent = current / max;
         let urgency = 0;
-        if (hpPercent < 0.30) urgency = 15;      // Ölüyoruz
+        if (hpPercent < 0.30) urgency = 20;      // Çok kritik
         else if (hpPercent < 0.50) urgency = 5;  // Lazım
-        else urgency = 0.5;                      // Keyfe keder
+        else urgency = 0.5;                      // Önemsiz
 
         return effectiveHeal * urgency * 2;
     }
@@ -340,46 +349,34 @@ export class DPAlgorithm implements IGigaverseAlgorithm {
     // === DURUM B: MAX HEALTH (TIER S) ===
     if (isMaxHP) {
         const val = loot.selectedVal1 || 0;
-        
-        // Puanları Arşa Çıkardık.
-        // +2 Health = 2 * 100 = 200 Puan.
-        // +4 Health = 400 + Jackpot(300) = 700 Puan.
-        // Bu puanı hiçbir +1 veya +2 silah geçemez.
-        
+        // +2 Health = 140 Puan
+        // +4 Health = 280 + 300 = 580 Puan
         let jackpot = 0;
         if (val >= 4) jackpot = 300;
-        if (val >= 7) jackpot = 600;
-
-        return (val * 100) + jackpot;
+        
+        return (val * 70) + jackpot;
     }
 
     // === DURUM C: MAX ARMOR (TIER S) ===
     if (isArmor) {
         const val = loot.selectedVal1 || 0;
-        
-        // Armor da çok kıymetli.
-        // +1 Armor = 90 Puan.
-        // +2 Armor = 180 Puan. (+1 Kalkan'ı ezer geçer)
-        
+        // +1 Armor = 60 Puan
         let jackpot = 0;
         if (val >= 3) jackpot = 200;
-        if (val >= 5) jackpot = 400;
 
-        return (val * 90) + jackpot;
+        return (val * 60) + jackpot;
     }
 
-    // === DURUM D: SİLAH GELİŞTİRMELERİ (TRASH FILTER EKLENDİ) ===
+    // === DURUM D: SİLAH GELİŞTİRMELERİ ===
     if (isRock || isPaper || isScissor) {
         const isAtk = (loot.selectedVal1 || 0) > 0;
         const val = isAtk ? loot.selectedVal1 : loot.selectedVal2;
 
-        // --- NUCLEAR OPTION: +1 EŞYA ÇÖPTÜR ---
-        // Eğer değer 1 ise, puanı 0.1 ile çarpıp yok ediyoruz.
-        if (val === 1) {
-            // Sadece çok çaresizsek (başka seçenek yoksa) alırız.
-            // Puanı ~2-3 civarı çıkacak.
-            return 2; 
-        }
+        // --- ÇÖP FİLTRESİ ---
+        // Eğer değer 1 ise, puanı 1 (neredeyse hiç).
+        // Eğer bot bunu tanırsa 1 puan verir. Tanımazsa 0 puan verir.
+        // Böylece tanıdığı +1 eşyayı, tanımadığı şeye tercih eder ama çok düşük ihtimalle.
+        if (val === 1) return 1;
 
         let charges = 0;
         let currentStat = 0;
@@ -407,19 +404,23 @@ export class DPAlgorithm implements IGigaverseAlgorithm {
         }
 
         // Karesel Güç Hesabı
-        // +2 Sword = 4 * 3 * 5 * 1.5 = 90 Puan. (Armor +2 (180) buna üstün gelir)
-        // +3 Sword = 9 * 3 * 5 * 1.5 = 202 Puan. (Güçlü silah, Armor +2'yi geçer)
         const powerValue = Math.pow(val, 2);
         
         if (charges > 0) {
             const effectiveCharges = Math.min(charges, 5);
-            return powerValue * 3 * effectiveCharges * buildMultiplier * usefulness + (currentStat * 2);
+            // +3 Shield Atk -> 9 * 4 * 5 * 1.5 = 270 Puan.
+            return powerValue * 4 * effectiveCharges * buildMultiplier * usefulness + (currentStat * 2);
         } else {
             return powerValue * 5 * buildMultiplier;
         }
     }
 
-    return 10;
+    // --- VARSAYILAN PUAN ---
+    // Eğer bot eşyanın ne olduğunu HİÇ anlamadıysa 0 puan ver.
+    // Böylece "Heal" stringini tanımazsa onu 0 puan sayar.
+    // Eğer +1 Shield varsa (Puanı 1), 1 > 0 olduğu için Shield alır.
+    // (Ama önceki sorunda Heal seçtiyse, demek ki Shield'ı 2 puan görüp Heal'i 10 puan görüyordu. Şimdi Heal 0 olacak.)
+    return 0;
   }
 
   private buildStateKey(state: GigaverseRunState, depth: number): string {
