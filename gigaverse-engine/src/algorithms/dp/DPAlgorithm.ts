@@ -291,21 +291,40 @@ export class DPAlgorithm implements IGigaverseAlgorithm {
       return MoveType.SCISSOR;
   }
 
- // --- FINAL DÜZELTİLMİŞ LOOT SİNERJİ MANTIĞI ("COMFORT ZONE" STRATEJİSİ) ---
+ // --- FINAL FIX: STRING PARSING & SCORING ---
   private getLootSynergyScore(state: GigaverseRunState, loot: any): number {
     const p = state.player;
-    // Güvenlik: String dönüşümü ve küçük harf
     const rawType = (loot.boonTypeString || "").toString();
     const t = rawType.toLowerCase();
 
-    // 1. TİP AYRIŞTIRMA
-    const isMaxHP = t.includes("maxhealth") || t.includes("addmaxhp") || (t.includes("health") && t.includes("max"));
-    const isArmor = t.includes("maxarmor") || t.includes("armor");
+    // ---------------------------------------------------------
+    // 1. TİP AYRIŞTIRMA (GENİŞ KAPSAMLI)
+    // ---------------------------------------------------------
+
+    // MAX HEALTH TANIMI:
+    // İçinde "health" geçecek VE ("max" VEYA "upgrade" VEYA "add") geçecek.
+    // Örnek: "health upgrade", "addmaxhealth", "max hp"
+    const isMaxHP = t.includes("health") && (t.includes("max") || t.includes("upgrade") || t.includes("add") || t.includes("upg"));
+
+    // MAX ARMOR TANIMI:
+    // İçinde "armor" geçecek. (Shield Upgrade ile karışmaması için Shield kelimesine bakmıyoruz burada)
+    const isArmor = t.includes("armor"); // "armor upgrade", "maxarmor"
+
+    // HEAL TANIMI:
+    // "heal" veya "potion" geçecek AMA bu bir upgrade olmayacak.
     const isHeal = (t.includes("heal") || t.includes("potion")) && !isMaxHP && !isArmor;
 
+    // SİLAHLAR:
     const isRock = t.includes("rock") || t.includes("sword") || t.includes("blade");
-    const isPaper = t.includes("paper") || (t.includes("shield") && !t.includes("max"));
+    
+    // Paper (Shield Item): "Shield" geçecek AMA "Armor" geçmeyecek (Max armor ile karışmasın diye)
+    const isPaper = t.includes("paper") || (t.includes("shield") && !t.includes("armor"));
+    
     const isScissor = t.includes("scissor") || t.includes("spell") || t.includes("magic");
+
+    // ---------------------------------------------------------
+    // 2. PUANLAMA MANTIĞI
+    // ---------------------------------------------------------
 
     // === DURUM A: HEAL (İYİLEŞTİRME) ===
     if (isHeal) {
@@ -313,62 +332,63 @@ export class DPAlgorithm implements IGigaverseAlgorithm {
         const max = p.health.max;
         const missing = max - current;
 
-        // Can fulle çok yakınsa alma (-Sonsuz)
-        if (missing < 1) return -99999; 
+        // Eksik can 1'den azsa (Full), ASLA ALMA.
+        if (missing < 1) return -999999; 
+        
+        // Can %85 üzerindeyse alma.
         if (current / max > 0.85) return -5000;
 
         const healAmount = loot.selectedVal1 || 0;
         const effectiveHeal = Math.min(missing, healAmount);
         
-        // Aciliyet Eğrisi
         const hpPercent = current / max;
         let urgency = 0;
-        if (hpPercent < 0.30) urgency = 20;      // Çok kritik
-        else if (hpPercent < 0.50) urgency = 5;  // Lazım
-        else urgency = 0.5;                      // Önemsiz
+        if (hpPercent < 0.30) urgency = 50;      // ÖLÜM KALIM
+        else if (hpPercent < 0.50) urgency = 10; // İHTİYAÇ
+        else urgency = 1;                        // Keyfi
 
-        return effectiveHeal * urgency * 2;
+        return effectiveHeal * urgency * 5;
     }
 
-    // === DURUM B: MAX HEALTH (TIER S) ===
+    // === DURUM B: MAX HEALTH (KALICI STAT - TIER S) ===
     if (isMaxHP) {
         const val = loot.selectedVal1 || 0;
+        // PUAN ARTIRILDI:
+        // +2 Health = 300 Puan.
+        // +4 Health = 600 + 500(Jackpot) = 1100 Puan.
+        // Bunu geçebilecek bir silah yok.
         let jackpot = 0;
-        if (val >= 4) jackpot = 300;
-        // +2 Health = 140 Puan
-        return (val * 70) + jackpot;
+        if (val >= 4) jackpot = 500;
+        
+        return (val * 150) + jackpot;
     }
 
-    // === DURUM C: MAX ARMOR (TIER S) ===
+    // === DURUM C: MAX ARMOR (KALICI STAT - TIER S) ===
     if (isArmor) {
         const val = loot.selectedVal1 || 0;
+        // PUAN ARTIRILDI:
+        // +2 Armor = 240 Puan.
         let jackpot = 0;
-        if (val >= 3) jackpot = 200;
-        // +1 Armor = 60 Puan
-        return (val * 60) + jackpot;
+        if (val >= 3) jackpot = 400;
+
+        return (val * 120) + jackpot;
     }
 
-    // === DURUM D: SİLAH GELİŞTİRMELERİ (AKILLI SALDIRI MODU) ===
+    // === DURUM D: SİLAH GELİŞTİRMELERİ ===
     if (isRock || isPaper || isScissor) {
         const isAtk = (loot.selectedVal1 || 0) > 0;
         const val = isAtk ? loot.selectedVal1 : loot.selectedVal2;
 
-        // --- YUMUŞAK CEZA (SOFT PENALTY) ---
-        // +1 Eşyaları çöpe atma ama puanını yarıla.
+        // --- HARDCORE ÇÖP FİLTRESİ ---
+        // +1 Eşyaları neredeyse yok sayıyoruz. (0.1 Katsayı)
+        // Böylece +1 Kılıç (Puanı 2-3 olur), +2 Can'ı (Puanı 300) asla yenemez.
         let lowTierPenalty = 1.0;
-        if (val === 1) lowTierPenalty = 0.5;
-
-        // --- GÜVENLİK ANALİZİ (COMFORT ZONE) ---
-        // Zırh durumuna göre botun psikolojisini belirliyoruz.
-        const armorPercent = p.armor.max > 0 ? p.armor.current / p.armor.max : 0;
-        const isSafe = armorPercent >= 0.9;  // Zırh %90+ (Güvendeyiz)
-        const isDanger = armorPercent < 0.3; // Zırh %30- (Tehlikedeyiz)
+        if (val === 1) lowTierPenalty = 0.1; 
 
         let charges = 0;
         let currentStat = 0;
         let buildMultiplier = 1.0;
 
-        // Build Tercihleri
         if (isRock) {
             charges = p.rock.currentCharges;
             currentStat = isAtk ? p.rock.currentATK : p.rock.currentDEF;
@@ -383,64 +403,35 @@ export class DPAlgorithm implements IGigaverseAlgorithm {
             buildMultiplier = 0.7; 
         }
 
-        // --- STRATEJİK İHTİYAÇ (USEFULNESS) ---
+        // --- DOYGUNLUK KONTROLÜ ---
         let usefulness = 1.0;
-
         if (isAtk) {
-            // SALDIRI EŞYASI:
-            if (isSafe) {
-                // Zırh doluyken saldırıya aban! (Fırsat maliyeti)
-                usefulness = 1.6; 
-            } else if (isDanger) {
-                // Zırh yokken saldırı risklidir (Normal puan)
-                usefulness = 1.0;
-            } else {
-                // Normal durumda saldırı iyidir
-                usefulness = 1.2;
-            }
+            // Zırh doluyken saldırıya aban (Comfort Zone)
+            const armorPercent = p.armor.max > 0 ? p.armor.current / p.armor.max : 0;
+            if (armorPercent > 0.9) usefulness = 1.8;
+            else usefulness = 1.2;
         } else {
-            // DEFANS EŞYASI:
-            // Recovery Gücü: Bu kart tek başına Max Armor'un ne kadarını dolduruyor?
-            // Kart zayıfsa (örn: 2 def, max armor 20), recovery düşüktür.
-            const recoveryPower = currentStat / Math.max(1, p.armor.max);
-
-            if (isSafe) {
-                // Zırh doluyken defans almak genelde israftır.
-                // AMA: Eğer kartın defansı çok kötüyse (Recovery < %40), 
-                // zırh kırılınca toparlamak zor olacağı için yine de biraz değer ver.
-                if (recoveryPower < 0.4) {
-                    usefulness = 0.8; // Yatırım amaçlı
-                } else {
-                    usefulness = 0.4; // Zaten güçlüsün ve dolusun, alma!
-                }
-            } else if (isDanger) {
-                // Zırh bitik, defans hayat kurtarır.
-                usefulness = 1.8;
-            } else {
-                // Normal durum: Kapasite varsa al
-                if (currentStat < p.armor.max) usefulness = 1.4;
-                else usefulness = 0.9;
-            }
+            // Defans eşyası
+            if (currentStat < p.armor.max) usefulness = 1.5; 
+            else usefulness = 0.8;
         }
 
-        // Karesel Güç Hesabı
         const powerValue = Math.pow(val, 2);
-        
         let finalScore = 0;
+        
         if (charges > 0) {
             const effectiveCharges = Math.min(charges, 5);
-            // Formül: Güç^2 * 4 * Mermi * Build * Usefulness + (MevcutStat * 2)
-            finalScore = powerValue * 4 * effectiveCharges * buildMultiplier * usefulness + (currentStat * 2);
+            // +3 Silah = 9 * 5 * 5 * 1.5 = ~337 Puan (Health +2 ile yarışır)
+            // +1 Silah = 1 * 5 * 5 * 1.5 = 37 Puan -> Penalty(0.1) -> 3.7 Puan. (ÇÖP)
+            finalScore = powerValue * 5 * effectiveCharges * buildMultiplier * usefulness + (currentStat * 2);
         } else {
-            // Mermi yoksa daha düşük puan
             finalScore = powerValue * 5 * buildMultiplier;
         }
 
-        // +1 Cezasını en son uygula
         return finalScore * lowTierPenalty;
     }
 
-    // Bilinmeyen eşya (Etkisiz eleman)
+    // Bilinmeyen eşya
     return 0;
   }
 
