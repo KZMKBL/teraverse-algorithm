@@ -1,21 +1,23 @@
 // path: gigaverse-engine/src/algorithms/dp/DPAlgorithm.ts
+/**
+ * A DP approach for picking the best immediate action, exploring up to maxHorizon steps.
+ * Includes "Synergy Heuristics" to make smarter build decisions (Loot picking).
+ */
 
 import {
   IGigaverseAlgorithm,
   GigaverseAction,
   GigaverseActionType,
 } from "../IGigaverseAlgorithm";
-import { 
-  GigaverseRunState, 
-  GigaverseFighter,
-  GigaverseMoveState 
-} from "../../simulator/GigaverseTypes";
+import { GigaverseRunState } from "../../simulator/GigaverseTypes";
+import { GigaverseSimulator } from "../../simulator/GigaverseSimulator";
 import { CustomLogger } from "../../types/CustomLogger";
 import { defaultLogger } from "../../utils/defaultLogger";
+import cloneDeep from "lodash/cloneDeep";
 import { defaultEvaluate } from "../defaultEvaluate";
 
 export interface DPConfig {
-  maxHorizon: number; 
+  maxHorizon: number;
   evaluateFn?: (state: GigaverseRunState) => number;
 }
 
@@ -24,172 +26,98 @@ interface DPResult {
   bestAction: GigaverseAction | null;
 }
 
-enum MoveType {
-  ROCK = "rock",
-  PAPER = "paper",
-  SCISSOR = "scissor",
-}
-
 export class DPAlgorithm implements IGigaverseAlgorithm {
   private config: Required<DPConfig>;
+  private simulator: GigaverseSimulator;
   private memo: Map<string, DPResult>;
   private logger: CustomLogger;
 
   constructor(config: DPConfig, logger?: CustomLogger) {
-    const targetHorizon = Math.max(config.maxHorizon, 6);
-
     this.config = {
-      maxHorizon: targetHorizon,
+      maxHorizon: config.maxHorizon,
       evaluateFn: config.evaluateFn ?? defaultEvaluate,
     };
     this.logger = logger ?? defaultLogger;
+    this.simulator = new GigaverseSimulator(this.logger);
     this.memo = new Map();
+
+    this.logger.info(
+      `[DPAlgorithm] Initialized => maxHorizon=${this.config.maxHorizon} (Smart Synergy Enabled)`
+    );
   }
 
   public pickAction(state: GigaverseRunState): GigaverseAction {
+    // Her hamlede hafızayı temizle (state çok değiştiği için)
     this.memo.clear();
     
-    // LOOT PHASE: Tier Sistemli Seçim
-    if (state.lootPhase) {
-        return this.pickBestLoot(state);
-    }
-
-    // COMBAT PHASE: Expectimax
-    const result = this.expectimaxSearch(state, this.config.maxHorizon);
+    const result = this.dpSearch(state, this.config.maxHorizon);
     
     if (!result.bestAction) {
+      this.logger.warn("[DPAlgorithm] No best action => fallback=MOVE_ROCK");
       return { type: GigaverseActionType.MOVE_ROCK };
     }
     
+    this.logger.debug(
+      `[DPAlgorithm] bestAction => ${result.bestAction.type}, value=${result.bestValue.toFixed(2)}`
+    );
     return result.bestAction;
   }
 
-  // --- LOOT SEÇİMİ ---
-  private pickBestLoot(state: GigaverseRunState): GigaverseAction {
-      let bestScore = -Infinity;
-      let bestIdx = 0;
-
-      for(let i=0; i < state.lootOptions.length; i++) {
-          const loot = state.lootOptions[i];
-          const score = this.getLootTierScore(state, loot);
-          
-          // Debug için (Hangi Tier'a girdiğini görmek istersen)
-          // this.logger.info(`Loot ${i}: ${loot.boonTypeString} => Puan: ${score}`);
-
-          if(score > bestScore) {
-              bestScore = score;
-              bestIdx = i;
-          }
-      }
-
-      switch(bestIdx) {
-          case 0: return { type: GigaverseActionType.PICK_LOOT_ONE };
-          case 1: return { type: GigaverseActionType.PICK_LOOT_TWO };
-          case 2: return { type: GigaverseActionType.PICK_LOOT_THREE };
-          case 3: return { type: GigaverseActionType.PICK_LOOT_FOUR };
-          default: return { type: GigaverseActionType.PICK_LOOT_ONE };
-      }
-  }
-
-  // --- TIER SİSTEMLİ PUANLAMA (KARIŞIKLIK YOK) ---
-  private getLootTierScore(state: GigaverseRunState, loot: any): number {
-    const p = state.player;
-    const type = loot.boonTypeString; 
-    
-    const val1 = loot.selectedVal1 || 0;
-    const val2 = loot.selectedVal2 || 0;
-
-    // --- BASE PUANLAR (RÜTBELER) ---
-    // Bu puanlar birbirine karışmayacak kadar uzak seçildi.
-    const TIER_S_PLUS = 10_000_000; // Efsanevi Statlar (+4 ve üzeri HP/Armor)
-    const TIER_S      =  5_000_000; // İyi Statlar (+2, +3 HP/Armor)
-    const TIER_A      =  1_000_000; // Standart Statlar (+1 HP/Armor)
-    const TIER_B      =    500_000; // Çok Güçlü Silahlar (+4 ve üzeri)
-    const TIER_C      =    100_000; // İyi Silahlar (+2, +3)
-    const TIER_D      =     10_000; // Acil İhtiyaç Heal
-    const TIER_F      =          0; // Çöp (+1 Silahlar, Gereksiz Heal)
-
-    // --- TİP ANALİZİ ---
-    
-    // 1. HEAL
-    if (type === "Heal") {
-        const missing = p.health.max - p.health.current;
-        if (missing < 1) return -999999; // Can Full
-        if (p.health.current / p.health.max > 0.90) return -5000;
-
-        const healAmount = val1;
-        const effectiveHeal = Math.min(missing, healAmount);
-        
-        // Sadece can kritikse değerlidir
-        if (p.health.current < p.health.max * 0.4) {
-            // Kritik durumdaysa Tier B ile yarışır (Silah yerine Can alabilir)
-            return TIER_B + (effectiveHeal * 1000); 
-        } else {
-            // Değilse Tier D (Stat varken alma)
-            return TIER_D + (effectiveHeal * 100);
-        }
-    }
-
-    // 2. MAX HEALTH
-    if (type === "AddMaxHealth") {
-        const val = val1;
-        // +4 ve üzeri -> S+ (Kesin Al)
-        if (val >= 4) return TIER_S_PLUS + (val * 1000);
-        // +2, +3 -> S (Çok Değerli)
-        if (val >= 2) return TIER_S + (val * 1000);
-        // +1 -> A (Yine de silahtan değerlidir)
-        return TIER_A + (val * 1000);
-    }
-
-    // 3. MAX ARMOR
-    if (type === "AddMaxArmor") {
-        const val = val1;
-        // +4 ve üzeri -> S+
-        if (val >= 4) return TIER_S_PLUS + (val * 1000);
-        // +2, +3 -> S
-        if (val >= 2) return TIER_S + (val * 1000);
-        // +1 -> A
-        return TIER_A + (val * 1000);
-    }
-
-    // 4. SİLAHLAR
-    if (type === "UpgradeRock" || type === "UpgradePaper" || type === "UpgradeScissor") {
-        const isAtk = val1 > 0;
-        const val = isAtk ? val1 : val2;
-
-        // +1 SİLAH DİREKT TIER F (ÇÖP)
-        if (val <= 1) return TIER_F + val;
-
-        // +4 ve üzeri Silah -> Tier B (Max Stat yoksa alınır)
-        if (val >= 4) return TIER_B + (val * 1000);
-
-        // +2, +3 Silah -> Tier C (İdare eder)
-        return TIER_C + (val * 1000);
-    }
-
-    return 0;
-  }
-
-  // --- SAVAŞ MOTORU (DEĞİŞMEDİ) ---
-  private expectimaxSearch(state: GigaverseRunState, depth: number): DPResult {
-    if (depth <= 0 || state.player.health.current <= 0 || state.currentEnemyIndex >= state.enemies.length) {
+  private dpSearch(state: GigaverseRunState, depth: number): DPResult {
+    // 1. Bitiş Koşulları
+    if (
+      depth <= 0 ||
+      state.player.health.current <= 0 ||
+      state.currentEnemyIndex >= state.enemies.length
+    ) {
       return { bestValue: this.config.evaluateFn(state), bestAction: null };
     }
 
+    // 2. Memoization (Hafıza Kontrolü)
     const key = this.buildStateKey(state, depth);
-    if (this.memo.has(key)) return this.memo.get(key)!;
+    if (this.memo.has(key)) {
+      return this.memo.get(key)!;
+    }
 
-    const myActions = this.getCombatActions(state);
-    if (myActions.length === 0) return { bestValue: -Infinity, bestAction: { type: GigaverseActionType.MOVE_ROCK } };
+    // 3. Olası Hamleleri Bul
+    const actions = this.getPossibleActions(state);
+    if (actions.length === 0) {
+      return { bestValue: this.config.evaluateFn(state), bestAction: null };
+    }
 
     let bestVal = -Infinity;
     let bestAct: GigaverseAction | null = null;
 
-    for (const myAct of myActions) {
-      const expectedValue = this.calculateExpectedValue(state, myAct, depth);
-      if (expectedValue > bestVal) {
-        bestVal = expectedValue;
-        bestAct = myAct;
+    // 4. Tüm Hamleleri Dene
+    for (const act of actions) {
+      const newSt = cloneDeep(state);
+      this.simulator.applyAction(newSt, act);
+
+      // Düşman öldü mü? Sonraki düşmana geç (Simülatör bunu yapmıyorsa manuel yapıyoruz)
+      const enemy = newSt.enemies[newSt.currentEnemyIndex];
+      if (enemy && enemy.health.current <= 0) {
+        newSt.currentEnemyIndex++;
+      }
+
+      // --- SİNERJİ & ZEKA BONUSU ---
+      // Simülasyon sonucuna ek olarak, "bu hamle mantıklı mı?" puanı ekliyoruz.
+      let heuristicBonus = 0;
+      if (state.lootPhase) {
+        const lootIndex = this.getLootIndexFromAction(act);
+        if (lootIndex !== -1 && state.lootOptions[lootIndex]) {
+            heuristicBonus = this.getLootSynergyScore(state, state.lootOptions[lootIndex]);
+        }
+      }
+      // -----------------------------
+
+      const sub = this.dpSearch(newSt, depth - 1);
+      
+      // Toplam Puan = (Gelecekteki Durum Puanı) + (Anlık Zeka Bonusu)
+      const totalScore = sub.bestValue + heuristicBonus;
+
+      if (totalScore > bestVal) {
+        bestVal = totalScore;
+        bestAct = act;
       }
     }
 
@@ -198,151 +126,147 @@ export class DPAlgorithm implements IGigaverseAlgorithm {
     return res;
   }
 
-  private calculateExpectedValue(state: GigaverseRunState, myAct: GigaverseAction, depth: number): number {
-      const enemy = state.enemies[state.currentEnemyIndex];
-      if (!enemy || enemy.health.current <= 0) return this.config.evaluateFn(state);
+/**
+   * Loot seçimlerinde botun IQ'sunu ve "Build" tercihini belirleyen fonksiyon.
+   * Rock/Paper tercih eder, Scissor'dan kaçınır.
+   */
+  private getLootSynergyScore(state: GigaverseRunState, loot: any): number {
+    const p = state.player;
+    const type = loot.boonTypeString;
+    let score = 0;
+  
+    switch (type) {
+      // --- CAN YÖNETİMİ ---
+      case "Heal": {
+        const missingHealth = p.health.max - p.health.current;
+        const healAmount = loot.selectedVal1 || 0;
+        if (missingHealth <= 0) return -5000;
+        
+        const effectiveHeal = Math.min(missingHealth, healAmount);
+        const urgencyMult = p.health.max / Math.max(1, p.health.current); 
+        
+        score += effectiveHeal * 5 * urgencyMult;
+        break;
+      }
+  
+      case "AddMaxHealth": {
+        // ESKİ: * 15 -> YENİ: * 40
+        // Max HP çok değerlidir, upgrade'e kolay kolay değişilmez.
+        score += (loot.selectedVal1 || 0) * 40; 
+        break;
+      }
+  
+      case "AddMaxArmor": {
+        // ESKİ: * 20 -> YENİ: * 60
+        // Armor oyundaki en kral stat olabilir (hasarı direkt düşüyor).
+        // +4 Armor (240 Puan), +3 Sword Def'i artık rahatça yener.
+        score += (loot.selectedVal1 || 0) * 60;
+        break;
+      }
+  
+      // --- SALDIRI / SAVUNMA GELİŞTİRMELERİ ---
+      case "UpgradeRock":
+      case "UpgradePaper":
+      case "UpgradeScissor": {
+        const isAtk = (loot.selectedVal1 || 0) > 0;
+        const val = isAtk ? loot.selectedVal1 : loot.selectedVal2;
+  
+        let charges = 0;
+        let currentStat = 0;
+        let buildMultiplier = 1.0;
 
-      const enemyMoves: MoveType[] = [];
-      if (enemy.rock.currentCharges > 0) enemyMoves.push(MoveType.ROCK);
-      if (enemy.paper.currentCharges > 0) enemyMoves.push(MoveType.PAPER);
-      if (enemy.scissor.currentCharges > 0) enemyMoves.push(MoveType.SCISSOR);
-      if (enemyMoves.length === 0) enemyMoves.push(MoveType.ROCK);
-
-      const probability = 1.0 / enemyMoves.length;
-      let totalWeightedScore = 0;
-      const myMove = this.actionToMoveType(myAct);
-
-      let deathDetected = false;
-      let deathScore = -Infinity;
-
-      for (const enemyMove of enemyMoves) {
-          const nextState = this.fastClone(state);
-          this.applyRoundOutcome(nextState, myMove, enemyMove);
-
-          const nextEnemy = nextState.enemies[nextState.currentEnemyIndex];
-          if (nextEnemy && nextEnemy.health.current <= 0) {
-              nextState.currentEnemyIndex++;
-          }
-
-          const subResult = this.expectimaxSearch(nextState, depth - 1);
-          
-          if (subResult.bestValue < -900000) {
-              deathDetected = true;
-              deathScore = subResult.bestValue;
-          }
-
-          totalWeightedScore += (subResult.bestValue * probability);
+        if (type === "UpgradeRock") {
+            charges = p.rock.currentCharges;
+            currentStat = isAtk ? p.rock.currentATK : p.rock.currentDEF;
+            buildMultiplier = 2.0; // Favori
+        } else if (type === "UpgradePaper") {
+            charges = p.paper.currentCharges;
+            currentStat = isAtk ? p.paper.currentATK : p.paper.currentDEF;
+            buildMultiplier = 2.0; // Favori
+        } else if (type === "UpgradeScissor") {
+            charges = p.scissor.currentCharges;
+            currentStat = isAtk ? p.scissor.currentATK : p.scissor.currentDEF;
+            buildMultiplier = 0.3; // Zayıf
+        }
+  
+        if (charges > 0) {
+            // DÜZELTME BURADA:
+            // Eskiden "charges" ile direkt çarpıyorduk (10 mermi varsa x10 puan).
+            // Şimdi "Effective Charges" kullanıyoruz. En fazla 6 mermi varmış gibi davran.
+            // Böylece mermi sayısı sonsuza gitse bile puan patlaması yaşanmaz.
+            const effectiveChargeImpact = Math.min(charges, 6); 
+            
+            // Çarpanı da 5'ten 4'e çektim. 
+            score += val * effectiveChargeImpact * 4 * buildMultiplier;
+            
+            // Mevcut stat bonusunu biraz düşürdük.
+            score += currentStat * 1 * buildMultiplier;
+        } else {
+            score += val * 1 * buildMultiplier;
+        }
+        break;
       }
 
-      if (deathDetected) return deathScore;
-      return totalWeightedScore;
+      default:
+        score += 20; 
+        break;
+    }
+  
+    return score;
   }
 
-  private fastClone(state: GigaverseRunState): GigaverseRunState {
-      return JSON.parse(JSON.stringify(state));
-  }
-
-  private applyRoundOutcome(state: GigaverseRunState, pMove: MoveType, eMove: MoveType) {
-      const p = state.player;
-      const e = state.enemies[state.currentEnemyIndex];
-      const pStats = this.getStats(p, pMove);
-      const eStats = this.getStats(e, eMove);
-
-      let pWins = false;
-      let tie = (pMove === eMove);
-      if (!tie) {
-          if (
-            (pMove === MoveType.ROCK && eMove === MoveType.SCISSOR) ||
-            (pMove === MoveType.PAPER && eMove === MoveType.ROCK) ||
-            (pMove === MoveType.SCISSOR && eMove === MoveType.PAPER)
-          ) { pWins = true; }
-      }
-
-      let dmgToE = 0, dmgToP = 0, armorGainP = 0, armorGainE = 0;
-      if (tie) {
-          dmgToE = pStats.currentATK;
-          dmgToP = eStats.currentATK;
-          armorGainP = pStats.currentDEF;
-          armorGainE = eStats.currentDEF;
-      } else if (pWins) {
-          dmgToE = pStats.currentATK;
-          armorGainP = pStats.currentDEF;
-      } else { 
-          dmgToP = eStats.currentATK;
-          armorGainE = eStats.currentDEF;
-      }
-
-      this.applyDamage(p, dmgToP, armorGainP);
-      this.applyDamage(e, dmgToE, armorGainE);
-      this.updateCharges(p, pMove);
-      this.updateCharges(e, eMove);
-  }
-
-  private applyDamage(fighter: GigaverseFighter, incoming: number, armorGain: number) {
-      fighter.armor.current = Math.min(fighter.armor.current + armorGain, fighter.armor.max);
-      let dmg = incoming;
-      if (fighter.armor.current > 0 && dmg > 0) {
-          const absorb = Math.min(fighter.armor.current, dmg);
-          fighter.armor.current -= absorb;
-          dmg -= absorb;
-      }
-      if (dmg > 0) {
-          fighter.health.current = Math.max(0, fighter.health.current - dmg);
-      }
-  }
-
-  private updateCharges(f: GigaverseFighter, used: MoveType) {
-      const st = this.getStats(f, used);
-      if (st.currentCharges > 1) st.currentCharges--;
-      else if (st.currentCharges === 1) st.currentCharges = -1; 
-
-      [MoveType.ROCK, MoveType.PAPER, MoveType.SCISSOR].forEach(m => {
-          if (m !== used) {
-              const s = this.getStats(f, m);
-              if (s.currentCharges === -1) s.currentCharges = 0;
-              else if (s.currentCharges >= 0 && s.currentCharges < 3) s.currentCharges++;
-          }
-      });
-  }
-
-  private getStats(f: GigaverseFighter, m: MoveType): GigaverseMoveState {
-      switch(m) {
-          case MoveType.ROCK: return f.rock;
-          case MoveType.PAPER: return f.paper;
-          case MoveType.SCISSOR: return f.scissor;
+  // Action tipinden Loot indexini bulur (0, 1, 2, 3)
+  private getLootIndexFromAction(act: GigaverseAction): number {
+      switch(act.type) {
+          case GigaverseActionType.PICK_LOOT_ONE: return 0;
+          case GigaverseActionType.PICK_LOOT_TWO: return 1;
+          case GigaverseActionType.PICK_LOOT_THREE: return 2;
+          case GigaverseActionType.PICK_LOOT_FOUR: return 3;
+          default: return -1;
       }
   }
 
-  private getCombatActions(state: GigaverseRunState): GigaverseAction[] {
-      const p = state.player;
+  private getPossibleActions(state: GigaverseRunState): GigaverseAction[] {
+    if (state.lootPhase && state.lootOptions.length > 0) {
       const acts: GigaverseAction[] = [];
-      if (p.rock.currentCharges > 0) acts.push({ type: GigaverseActionType.MOVE_ROCK });
-      if (p.paper.currentCharges > 0) acts.push({ type: GigaverseActionType.MOVE_PAPER });
-      if (p.scissor.currentCharges > 0) acts.push({ type: GigaverseActionType.MOVE_SCISSOR });
+      for (let i = 0; i < state.lootOptions.length; i++) {
+        switch (i) {
+          case 0: acts.push({ type: GigaverseActionType.PICK_LOOT_ONE }); break;
+          case 1: acts.push({ type: GigaverseActionType.PICK_LOOT_TWO }); break;
+          case 2: acts.push({ type: GigaverseActionType.PICK_LOOT_THREE }); break;
+          case 3: acts.push({ type: GigaverseActionType.PICK_LOOT_FOUR }); break;
+        }
+      }
       return acts;
-  }
+    }
 
-  private actionToMoveType(act: GigaverseAction): MoveType {
-      if (act.type === GigaverseActionType.MOVE_ROCK) return MoveType.ROCK;
-      if (act.type === GigaverseActionType.MOVE_PAPER) return MoveType.PAPER;
-      return MoveType.SCISSOR;
+    const p = state.player;
+    const result: GigaverseAction[] = [];
+    if (p.rock.currentCharges > 0) result.push({ type: GigaverseActionType.MOVE_ROCK });
+    if (p.paper.currentCharges > 0) result.push({ type: GigaverseActionType.MOVE_PAPER });
+    if (p.scissor.currentCharges > 0) result.push({ type: GigaverseActionType.MOVE_SCISSOR });
+    
+    // Mermi yoksa mecburen Rock (Fallback)
+    if (result.length === 0) result.push({ type: GigaverseActionType.MOVE_ROCK });
+    
+    return result;
   }
 
   private buildStateKey(state: GigaverseRunState, depth: number): string {
+    // JSON.stringify yerine manuel string birleştirme (PERFORMANS BOOST)
     const p = state.player;
-    const e = state.enemies[state.currentEnemyIndex]; 
-    if (!e || e.health.current <= 0) return `END|${depth}|${p.health.current}|${state.currentEnemyIndex}`;
+    
+    // Sadece karar için kritik olan verileri anahtara ekliyoruz.
+    // Loot seçeneklerini de anahtara eklemeliyiz ki loot phase'de saçmalamasın.
+    let lootKey = "";
+    if (state.lootPhase) {
+        lootKey = state.lootOptions.map(l => l.boonTypeString + l.selectedVal1).join("-");
+    }
 
-    const playerKey = `${p.health.current.toFixed(1)}|${p.armor.current}|` +
-           `${p.rock.currentCharges}-${p.rock.currentATK}-${p.rock.currentDEF}|` +
-           `${p.paper.currentCharges}-${p.paper.currentATK}-${p.paper.currentDEF}|` +
-           `${p.scissor.currentCharges}-${p.scissor.currentATK}-${p.scissor.currentDEF}`;
-
-    const enemyKey = `${e.health.current.toFixed(1)}|${e.armor.current}|` +
-           `${e.rock.currentCharges}-${e.rock.currentATK}-${e.rock.currentDEF}|` +
-           `${e.paper.currentCharges}-${e.paper.currentATK}-${e.paper.currentDEF}|` +
-           `${e.scissor.currentCharges}-${e.scissor.currentATK}-${e.scissor.currentDEF}`;
-
-    return `${depth}|${state.currentEnemyIndex}|${playerKey}|VS|${enemyKey}`;
+    return `${depth}|${state.currentEnemyIndex}|${p.health.current}|${p.armor.current}|` +
+           `${p.rock.currentCharges}-${p.rock.currentATK}|` +
+           `${p.paper.currentCharges}-${p.paper.currentATK}|` +
+           `${p.scissor.currentCharges}-${p.scissor.currentATK}|` +
+           `${lootKey}`;
   }
 }
