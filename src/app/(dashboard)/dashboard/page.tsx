@@ -35,7 +35,8 @@ const browserLogger = {
   info: (msg: string) => console.log(`%c[BOT] ${msg}`, 'color: #00ffff; font-weight: bold;'),
   warn: (msg: string) => console.warn(`[BOT WARN] ${msg}`),
   error: (msg: string) => console.error(`[BOT ERROR] ${msg}`),
-  debug: (msg: string) => console.log(`%c[DEBUG] ${msg}`, 'color: #aaaaaa; font-style: italic;`),
+  debug: (msg: string) => console.log(`%c[DEBUG] ${msg}`, 'color: #aaaaaa; font-style: italic;'),
+
 }
 
 /**
