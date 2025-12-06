@@ -16,9 +16,5 @@ export * from "./algorithms/minimax/MinimaxAlgorithm";
 export * from "./algorithms/dp/DPAlgorithm";
 export * from "./algorithms/astar/AStarAlgorithm";
 
-export { combatEvaluate } from "./algorithms/combatEvaluate";
-export { evaluateLoot } from "./algorithms/lootEvaluate";
-export { hybridEvaluate } from "./algorithms/hybridEvaluate";
-
 export * from "./types/CustomLogger";
 export * from "./utils/defaultLogger";
