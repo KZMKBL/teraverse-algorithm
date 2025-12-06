@@ -132,7 +132,7 @@ export class DPAlgorithm implements IGigaverseAlgorithm {
    */
   private getLootSynergyScore(state: GigaverseRunState, loot: any): number {
     const p = state.player;
-    const type = loot.boonTypeString; // "Heal", "UpgradeRock" vb.
+    const type = loot.boonTypeString;
     let score = 0;
   
     switch (type) {
@@ -140,14 +140,9 @@ export class DPAlgorithm implements IGigaverseAlgorithm {
       case "Heal": {
         const missingHealth = p.health.max - p.health.current;
         const healAmount = loot.selectedVal1 || 0;
-  
-        // Eğer can full ise veya çok az eksikse ALMA (Büyük ceza puanı)
         if (missingHealth <= 0) return -5000;
         
-        // Efektif iyileştirme hesabı (Boşa giden heali sayma)
         const effectiveHeal = Math.min(missingHealth, healAmount);
-        
-        // Aciliyet katsayısı: Can ne kadar azsa o kadar değerli
         const urgencyMult = p.health.max / Math.max(1, p.health.current); 
         
         score += effectiveHeal * 5 * urgencyMult;
@@ -155,18 +150,21 @@ export class DPAlgorithm implements IGigaverseAlgorithm {
       }
   
       case "AddMaxHealth": {
-        // Max HP her zaman iyidir.
-        score += (loot.selectedVal1 || 0) * 15; 
+        // ESKİ: * 15 -> YENİ: * 40
+        // Max HP çok değerlidir, upgrade'e kolay kolay değişilmez.
+        score += (loot.selectedVal1 || 0) * 40; 
         break;
       }
   
       case "AddMaxArmor": {
-        // Zırh çok değerlidir.
-        score += (loot.selectedVal1 || 0) * 20;
+        // ESKİ: * 20 -> YENİ: * 60
+        // Armor oyundaki en kral stat olabilir (hasarı direkt düşüyor).
+        // +4 Armor (240 Puan), +3 Sword Def'i artık rahatça yener.
+        score += (loot.selectedVal1 || 0) * 60;
         break;
       }
   
-      // --- SALDIRI / SAVUNMA GELİŞTİRMELERİ & BUILD STRATEJİSİ ---
+      // --- SALDIRI / SAVUNMA GELİŞTİRMELERİ ---
       case "UpgradeRock":
       case "UpgradePaper":
       case "UpgradeScissor": {
@@ -175,45 +173,41 @@ export class DPAlgorithm implements IGigaverseAlgorithm {
   
         let charges = 0;
         let currentStat = 0;
-        
-        // --- ÖNCELİK AYARLARI (BUILD BIAS) ---
-        // 1.0 = Normal, >1.0 = Torpilli, <1.0 = Cezalı
         let buildMultiplier = 1.0;
 
         if (type === "UpgradeRock") {
             charges = p.rock.currentCharges;
             currentStat = isAtk ? p.rock.currentATK : p.rock.currentDEF;
-            // Rock güçlü silahımız, öncelik veriyoruz (x2 Puan)
-            buildMultiplier = 2.0; 
+            buildMultiplier = 2.0; // Favori
         } else if (type === "UpgradePaper") {
             charges = p.paper.currentCharges;
             currentStat = isAtk ? p.paper.currentATK : p.paper.currentDEF;
-            // Paper da güçlü silahımız, öncelik veriyoruz (x2 Puan)
-            buildMultiplier = 2.0; 
+            buildMultiplier = 2.0; // Favori
         } else if (type === "UpgradeScissor") {
             charges = p.scissor.currentCharges;
             currentStat = isAtk ? p.scissor.currentATK : p.scissor.currentDEF;
-            // Scissor en zayıf silahımız, mecbur kalmadıkça alma (%70 puan kırpma)
-            buildMultiplier = 0.3; 
+            buildMultiplier = 0.3; // Zayıf
         }
   
-        // SİNERJİ MANTIĞI:
-        // (Güç Miktarı) x (Mermi) x 5 x (BUILD TERCİHİ)
         if (charges > 0) {
-            score += val * charges * 5 * buildMultiplier;
+            // DÜZELTME BURADA:
+            // Eskiden "charges" ile direkt çarpıyorduk (10 mermi varsa x10 puan).
+            // Şimdi "Effective Charges" kullanıyoruz. En fazla 6 mermi varmış gibi davran.
+            // Böylece mermi sayısı sonsuza gitse bile puan patlaması yaşanmaz.
+            const effectiveChargeImpact = Math.min(charges, 6); 
             
-            // Zaten güçlü olduğumuz şeyi daha da güçlendirmek (Stacking) iyidir
-            score += currentStat * 2 * buildMultiplier;
+            // Çarpanı da 5'ten 4'e çektim. 
+            score += val * effectiveChargeImpact * 4 * buildMultiplier;
+            
+            // Mevcut stat bonusunu biraz düşürdük.
+            score += currentStat * 1 * buildMultiplier;
         } else {
-            // Mermim yoksa bile, eğer Rock/Paper ise "geleceğe yatırım" puanı ver.
-            // Ama Scissor ise ve mermi yoksa neredeyse 0 puan alır.
-            score += val * 2 * buildMultiplier;
+            score += val * 1 * buildMultiplier;
         }
         break;
       }
 
       default:
-        // Tanınmayan eşyalar için standart puan
         score += 20; 
         break;
     }
