@@ -88,119 +88,120 @@ export class DPAlgorithm implements IGigaverseAlgorithm {
       }
   }
 
-  // --- PUANLAMA MOTORU ---
+  // --- PUANLAMA MOTORU (SAYI ODAKLI & HATA KORUMALI) ---
   private getLootSynergyScore(state: GigaverseRunState, loot: any): number {
     const p = state.player;
-    const type = loot.boonTypeString; 
     
+    // Değerleri al
     const val1 = loot.selectedVal1 || 0;
     const val2 = loot.selectedVal2 || 0;
+    
+    // Eşyanın Toplam "Gücü" (Stat büyüklüğü)
+    // +2 Can -> Güç 2.
+    // +3 Atk / +0 Def -> Güç 3.
+    const rawPower = val1 + val2;
 
-    switch (type) {
-        // 1. HEAL
-        case "Heal": {
-            const current = p.health.current;
-            const max = p.health.max;
-            const missing = max - current;
+    // --- ADIM 1: TABAN PUAN (SAYILARA GÖRE) ---
+    // İsmi ne olursa olsun, büyük sayı iyidir.
+    // +1 -> 10 Puan
+    // +2 -> 200 Puan (Karesiyle artan değer)
+    // +3 -> 450 Puan
+    // Bu sayede tanımsız +2 eşya, tanımlı +1 eşyayı her zaman yener.
+    let score = Math.pow(rawPower, 2) * 50; 
 
-            if (missing < 1) return -999999; 
-            if (current / max > 0.95) return -5000;
+    // +1 Eşyalar için Taban Puanı baştan öldür.
+    if (rawPower === 1) score = 5; 
 
-            const healAmount = val1;
-            const effectiveHeal = Math.min(missing, healAmount);
-            
-            const wasted = healAmount - effectiveHeal;
-            let efficiencyBonus = 1.0;
-            if (wasted === 0) efficiencyBonus = 10.0; 
-            else if (wasted < healAmount * 0.3) efficiencyBonus = 3.0;
+    // ---------------------------------------------------------
+    // ADIM 2: TİP ANALİZİ VE ÇARPANLAR
+    // ---------------------------------------------------------
+    const rawType = (loot.boonTypeString || "").toString();
+    const t = rawType.toLowerCase();
 
-            const hpPercent = current / max;
-            let urgency = 1;
-            if (hpPercent < 0.30) urgency = 50;      
-            else if (hpPercent < 0.60) urgency = 10; 
-            else urgency = 2;                        
-            
-            return effectiveHeal * urgency * efficiencyBonus;
-        }
+    // TİP TESPİTİ (Basitleştirilmiş)
+    const isHeal = (t === "heal" || t.includes("potion")) && !t.includes("health"); // "Health" geçiyorsa Heal değildir!
+    
+    const isMaxHP = t.includes("health") || t.includes("vitality") || t.includes("hp");
+    const isArmor = t.includes("armor") || t.includes("shieldmax");
+    
+    const isRock = t.includes("rock") || t.includes("sword");
+    const isPaper = t.includes("paper") || (t.includes("shield") && !isArmor);
+    const isScissor = t.includes("scissor") || t.includes("spell") || t.includes("magic");
 
-        // 2. MAX HEALTH
-        case "AddMaxHealth": {
-            let jackpot = 0;
-            if (val1 >= 4) jackpot = 500;
-            return (val1 * 200) + jackpot;
-        }
+    // --- DURUM A: HEAL (İSTİSNA) ---
+    // Heal bir stat değil, eylemdir. Özel hesap gerektirir.
+    if (isHeal) {
+        const missing = p.health.max - p.health.current;
+        if (missing < 1) return -999999; // Can full
+        if (p.health.current / p.health.max > 0.90) return -5000;
 
-        // 3. MAX ARMOR
-        case "AddMaxArmor": {
-            let jackpot = 0;
-            if (val1 >= 3) jackpot = 400;
-            return (val1 * 180) + jackpot;
-        }
-
-        // 4. SİLAH GELİŞTİRMELERİ
-        case "UpgradeRock":    
-        case "UpgradePaper":   
-        case "UpgradeScissor": 
-        {
-            const isAtk = val1 > 0;
-            const val = isAtk ? val1 : val2;
-
-            let lowTierPenalty = 1.0;
-            if (val === 1) lowTierPenalty = 0.01; 
-
-            let charges = 0;
-            let currentStat = 0;
-            let buildMultiplier = 1.0;
-
-            if (type === "UpgradeRock") {
-                charges = p.rock.currentCharges;
-                currentStat = isAtk ? p.rock.currentATK : p.rock.currentDEF;
-                buildMultiplier = 1.5; 
-            } else if (type === "UpgradePaper") {
-                charges = p.paper.currentCharges;
-                currentStat = isAtk ? p.paper.currentATK : p.paper.currentDEF;
-                buildMultiplier = 1.5; 
-            } else if (type === "UpgradeScissor") {
-                charges = p.scissor.currentCharges;
-                currentStat = isAtk ? p.scissor.currentATK : p.scissor.currentDEF;
-                buildMultiplier = 0.7; 
-            }
-
-            let usefulness = 1.0;
-            if (isAtk) {
-                const armorPercent = p.armor.max > 0 ? p.armor.current / p.armor.max : 0;
-                if (armorPercent > 0.9) usefulness = 1.8; 
-                else usefulness = 1.2;
-            } else {
-                const futureDef = currentStat + val;
-                if (futureDef > p.armor.max) {
-                    const usefulAmount = Math.max(0, p.armor.max - currentStat);
-                    if (usefulAmount > val / 2) usefulness = 0.5;
-                    else usefulness = 0.05;
-                } else if (futureDef === p.armor.max) {
-                    usefulness = 1.6; 
-                } else {
-                    usefulness = 1.5; 
-                }
-            }
-
-            const powerValue = Math.pow(val, 2);
-            const WEAPON_BASE_MULTIPLIER = 10; 
-
-            let baseScore = 0;
-            if (charges > 0) {
-                const effectiveCharges = Math.min(charges, 5);
-                baseScore = powerValue * WEAPON_BASE_MULTIPLIER * effectiveCharges * buildMultiplier * usefulness + (currentStat * 2);
-            } else {
-                baseScore = powerValue * WEAPON_BASE_MULTIPLIER * buildMultiplier;
-            }
-
-            return baseScore * lowTierPenalty;
-        }
-
-        default:
-            return 0; 
+        // Aciliyet (Can azsa değeri artar)
+        const urgency = p.health.current < p.health.max * 0.5 ? 10 : 2;
+        return Math.min(missing, val1) * urgency * 5;
     }
+
+    // --- DURUM B: TİP ÇARPANLARI ---
+    
+    if (isMaxHP) {
+        // Max HP en değerlisidir. Taban puanı x4 yap.
+        // +2 Health -> Taban(200) * 4 = 800 Puan.
+        score *= 4.0;
+        
+        // Jackpot
+        if (rawPower >= 4) score += 500;
+    }
+    else if (isArmor) {
+        // Max Armor çok iyidir. x3.5 yap.
+        // +2 Armor -> Taban(200) * 3.5 = 700 Puan.
+        score *= 3.5;
+    }
+    else if (isRock || isPaper || isScissor) {
+        // Silahlar. Taban puanı duruma göre ayarla.
+        
+        let buildMult = 1.0;
+        if (isRock || isPaper) buildMult = 1.5; // Güçlü silahlar
+        if (isScissor) buildMult = 0.8;         // Zayıf silah
+
+        // Zırh Doluluk Kontrolü
+        // Bu bir saldırı mı? (val1 > 0)
+        const isAtk = val1 > 0;
+        let usefulness = 1.0;
+
+        if (isAtk) {
+            // Zırh doluyken saldırı x1.5 daha değerlidir.
+            if (p.armor.current >= p.armor.max * 0.9) usefulness = 1.5;
+        } else {
+            // Defans eşyası. Zırh taşıyorsa cezalandır.
+            const currentItemStat = isRock ? p.rock.currentDEF : (isPaper ? p.paper.currentDEF : p.scissor.currentDEF);
+            if ((currentItemStat + rawPower) > p.armor.max) {
+                usefulness = 0.1; // BOŞA GİDER -> ÇÖP
+            } else {
+                usefulness = 1.5; // İhtiyaç var
+            }
+        }
+
+        score *= buildMult * usefulness;
+        
+        // Mermi Bonusu (Ufak etki)
+        let charges = 0;
+        if (isRock) charges = p.rock.currentCharges;
+        else if (isPaper) charges = p.paper.currentCharges;
+        else if (isScissor) charges = p.scissor.currentCharges;
+        
+        if (charges > 0) score *= 1.2;
+    }
+    else {
+        // TİP TANIMLANAMADI! (Burası senin sorunun çözümü)
+        // Ama puanı "Taban Puan" olarak kaldı.
+        // +2 Bilinmeyen Eşya -> 200 Puan.
+        // +1 Bilinen Kılıç -> ~10-15 Puan.
+        // KAZANAN: Bilinmeyen +2 Eşya.
+        
+        // Tanınmayan ama yüksek statlı eşyaya güvenelim.
+        score *= 1.0; 
+    }
+
+    return score;
   }
 
   // --- SAVAŞ MOTORU (EXPECTIMAX + LETHAL CHECK) ---
