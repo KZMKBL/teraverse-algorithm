@@ -89,102 +89,216 @@ export class DPAlgorithm implements IGigaverseAlgorithm {
       }
   }
 
-  // --- (Mevcut) getLootSynergyScore'in aynısını kullandım, değiştirmek istersin söyle ---
+    // --- YENİ: LOOT SKORLAMASI (SDV + BUILD ANALYSIS + MICRO-SIM) ---
   private getLootSynergyScore(state: GigaverseRunState, loot: any): number {
-    const p = state.player;
+    // 1) Temel: evaluate fonksiyonuyla state delta (SDV)
+    const baseDelta = this.computeStateDeltaValue(state, loot);
+
+    // 2) Build analizi: hangi silah/istat öne çıkıyor?
+    const buildPref = this.analyzeBuildPreference(state); // returns { rock: number, paper: number, scissor: number, hp: number, armor: number, charges: number }
+
+    // 3) Micro-simulation: kısa vadeli etkiler (3 tur)
+    const micro = this.microSimulateLootEffect(state, loot, 3);
+
+    // 4) Tür bazlı multipliers: loot tipini tespit et ve build ile eşleştir
     const rawType = (loot.boonTypeString || "").toString();
     const t = rawType.toLowerCase();
-    
+    const isHeal = (rawType === "Heal" || t === "heal" || t.includes("potion")) && !t.includes("maxhealth") && !t.includes("addmaxhealth");
+    const isMaxHP = rawType === "AddMaxHealth" || t.includes("maxhealth") || t.includes("vitality") || t.includes("hp");
+    const isArmor = rawType === "AddMaxArmor" || t.includes("armor");
+    const isRock = rawType === "UpgradeRock" || t.includes("rock") || t.includes("sword");
+    const isPaper = rawType === "UpgradePaper" || t.includes("paper") || t.includes("shield");
+    const isScissor = rawType === "UpgradeScissor" || t.includes("scissor") || t.includes("spell") || t.includes("magic");
+
+    // baseScore başlangıç: evaluate delta
+    let score = baseDelta;
+
+    // Build preference multiplier: eğer loot tercih edilen statla uyuşuyorsa bonus ver
+    const prefBonusWeight = 1.0;
+    if (isRock) score += prefBonusWeight * 50 * buildPref.rock;
+    if (isPaper) score += prefBonusWeight * 50 * buildPref.paper;
+    if (isScissor) score += prefBonusWeight * 50 * buildPref.scissor;
+    if (isMaxHP) score += prefBonusWeight * 40 * buildPref.hp;
+    if (isArmor) score += prefBonusWeight * 40 * buildPref.armor;
+    if (isHeal) score += prefBonusWeight * 30 * (buildPref.hp + 0.5); // heal daha çok hp tercihine bağlıdır
+
+    // Micro-sim etkileri: ΔTTK (düşüş iyi) ve ΔSurvival (artış çok iyi)
+    // micro.deltaTTK: newTTK - oldTTK (negatifse TTK azalmış => iyi)
+    // micro.deltaSurvival: newSurv - oldSurv (pozitifse iyi)
+    const ttkFactor = 1200; // TTK farkını puana çevirme ölçeği
+    const survivalFactor = 4000; // survival farkını puana çevirme ölçeği (öncelikli)
+    score += -micro.deltaTTK * ttkFactor; // TTK azaldıysa pozitif katkı yap
+    score += micro.deltaSurvival * survivalFactor;
+
+    // Küçük bir taşıyıcı: charges veya +1 small upgrades için mantıklı ama aşırı cezalandırılmamış
     const val1 = loot.selectedVal1 || 0;
     const val2 = loot.selectedVal2 || 0;
-
-    const isMaxHP = rawType === "AddMaxHealth" || t.includes("health") || t.includes("vitality") || t.includes("hp");
-    const isArmor = rawType === "AddMaxArmor" || t.includes("armor");
-    const isHeal = (rawType === "Heal" || t === "heal" || t.includes("potion")) && !isMaxHP;
-    const isRock = rawType === "UpgradeRock" || t.includes("sword") || t.includes("rock");
-    const isPaper = rawType === "UpgradePaper" || t.includes("shield") || t.includes("paper");
-    const isScissor = rawType === "UpgradeScissor" || t.includes("spell") || t.includes("magic") || t.includes("scissor");
-
-    if (isHeal) {
-        const current = p.health.current;
-        const max = p.health.max;
-        const missing = max - current;
-
-        if (missing < 1) return -999999; 
-        if (current / max > 0.90) return -5000;
-
-        const effectiveHeal = Math.min(missing, val1);
-        
-        const hpPercent = current / max;
-        let urgency = 1;
-        if (hpPercent < 0.30) urgency = 50;      
-        else if (hpPercent < 0.50) urgency = 10; 
-        
-        return effectiveHeal * urgency * 5;
+    // Eğer item weapon upgrade ise ve sadece +1 ise normal penalti yerine micro-sim kararına bak
+    if ((isRock || isPaper || isScissor) && (val1 === 1 || val2 === 1)) {
+      // +1'ler artık tamamen çöpe atılmıyor; micro-sim pozitifse değerli olabilir
+      score += Math.max(0, micro.deltaSurvival * 1000);
     }
 
-    if (isMaxHP) {
-        let jackpot = 0;
-        if (val1 >= 4) jackpot = 500;
-        return (val1 * 200) + jackpot;
+    // Son düzeltme: çok uç değerleri kırp (numerik stabilite)
+    if (!Number.isFinite(score)) score = -1e9;
+    return score;
+  }
+
+  // UYGULA: loot'u klon state'e uygular (basit fakat kapsayıcı)
+  private applyLootToClone(clone: GigaverseRunState, loot: any) {
+    // Bu fonksiyon loot formatına bağlı olarak genişletilebilir.
+    const rawType = (loot.boonTypeString || "").toString();
+    const t = rawType.toLowerCase();
+    const v1 = loot.selectedVal1 || 0;
+    const v2 = loot.selectedVal2 || 0;
+    const p = clone.player;
+
+    // Max Health
+    if (rawType === "AddMaxHealth" || t.includes("maxhealth") || t.includes("vitality")) {
+      p.health.max += v1;
+      p.health.current += v1; // genelde max hp arttığında current de artar (bunu tercih edilebilir yap)
     }
 
-    if (isArmor) {
-        let jackpot = 0;
-        if (val1 >= 3) jackpot = 400;
-        return (val1 * 180) + jackpot;
+    // Max Armor
+    else if (rawType === "AddMaxArmor" || t.includes("maxarmor") || t.includes("armor")) {
+      p.armor.max += v1;
+      p.armor.current = Math.min(p.armor.current + v1, p.armor.max);
     }
 
-    if (isRock || isPaper || isScissor) {
-        const isAtk = val1 > 0;
-        const val = isAtk ? val1 : val2;
+    // Heal / Potion
+    else if (rawType === "Heal" || t === "heal" || t.includes("potion")) {
+      p.health.current = Math.min(p.health.max, p.health.current + v1);
+    }
 
-        let lowTierPenalty = 1.0;
-        if (val === 1) lowTierPenalty = 0.1; 
+    // Weapon Upgrades (Attack)
+    else if (rawType === "UpgradeRock" || t.includes("upgraderock") || t.includes("rock")) {
+      if (v1 > 0) p.rock.currentATK += v1;
+      if (v2 > 0) p.rock.currentDEF += v2;
+    } else if (rawType === "UpgradePaper" || t.includes("upgradepaper") || t.includes("paper")) {
+      if (v1 > 0) p.paper.currentATK += v1;
+      if (v2 > 0) p.paper.currentDEF += v2;
+    } else if (rawType === "UpgradeScissor" || t.includes("upgradescissor") || t.includes("scissor") || t.includes("spell") || t.includes("magic")) {
+      if (v1 > 0) p.scissor.currentATK += v1;
+      if (v2 > 0) p.scissor.currentDEF += v2;
+    }
 
-        let charges = 0;
-        let currentStat = 0;
-        let buildMultiplier = 1.0;
+    // Generic fallback: bazı boon'lar item stats olarak geçiyorsa
+    else {
+      // Eğer loot bir obje ile ekstra charges veya benzeri veriyorsa uygula (deneyselse)
+      if (loot.grantCharges && typeof loot.grantCharges === "object") {
+        p.rock.currentCharges = Math.min(3, p.rock.currentCharges + (loot.grantCharges.rock || 0));
+        p.paper.currentCharges = Math.min(3, p.paper.currentCharges + (loot.grantCharges.paper || 0));
+        p.scissor.currentCharges = Math.min(3, p.scissor.currentCharges + (loot.grantCharges.scissor || 0));
+      }
+    }
+  }
 
-        if (isRock) {
-            charges = p.rock.currentCharges;
-            currentStat = isAtk ? p.rock.currentATK : p.rock.currentDEF;
-            buildMultiplier = 1.5; 
-        } else if (isPaper) {
-            charges = p.paper.currentCharges;
-            currentStat = isAtk ? p.paper.currentATK : p.paper.currentDEF;
-            buildMultiplier = 1.5; 
-        } else if (isScissor) {
-            charges = p.scissor.currentCharges;
-            currentStat = isAtk ? p.scissor.currentATK : p.scissor.currentDEF;
-            buildMultiplier = 0.7; 
+  // compute evaluate(newState) - evaluate(oldState)
+  private computeStateDeltaValue(state: GigaverseRunState, loot: any): number {
+    const oldScore = this.config.evaluateFn(state);
+
+    const clone = this.fastClone(state);
+    this.applyLootToClone(clone, loot);
+
+    const newScore = this.config.evaluateFn(clone);
+    return newScore - oldScore;
+  }
+
+  // Basit build analizi: hangi silah build'i daha avantajlı? (normalize edilmiş skorlar)
+  private analyzeBuildPreference(state: GigaverseRunState): { rock: number, paper: number, scissor: number, hp: number, armor: number, charges: number } {
+    const p = state.player;
+    // Basit heuristic: (atk * charges) + def bonus + relative to enemy
+    const enemy = state.enemies[state.currentEnemyIndex] || null;
+
+    const rockScore = (p.rock.currentATK * Math.max(1, Math.min(3, p.rock.currentCharges))) + (p.rock.currentDEF * 0.5);
+    const paperScore = (p.paper.currentATK * Math.max(1, Math.min(3, p.paper.currentCharges))) + (p.paper.currentDEF * 0.5);
+    const scissorScore = (p.scissor.currentATK * Math.max(1, Math.min(3, p.scissor.currentCharges))) + (p.scissor.currentDEF * 0.5);
+
+    const maxWeapon = Math.max(rockScore, paperScore, scissorScore, 1);
+    const rockPref = rockScore / maxWeapon;
+    const paperPref = paperScore / maxWeapon;
+    const scissorPref = scissorScore / maxWeapon;
+
+    // HP vs Armor tendency: düşük HP -> hp ağırlığı artar; yüksek armor mevcutsa armor ağırlığı artar.
+    const hpPref = 1 - (p.health.current / Math.max(1, p.health.max)); // daha düşük can => hpPref yüksek
+    const armorPref = p.armor.current / Math.max(1, p.armor.max || 1);
+
+    // charges pref: ne kadar mermi kaldığı (daha azsa charges daha değerli)
+    const totalCharges = Math.max(0, (p.rock.currentCharges > 0 ? p.rock.currentCharges : 0) + (p.paper.currentCharges > 0 ? p.paper.currentCharges : 0) + (p.scissor.currentCharges > 0 ? p.scissor.currentCharges : 0));
+    const chargesPref = 1 - Math.min(1, totalCharges / 9); // az charges -> daha yüksek pref
+
+    return { rock: rockPref, paper: paperPref, scissor: scissorPref, hp: hpPref, armor: armorPref, charges: chargesPref };
+  }
+
+  // Micro-simulate: belirli tur kadar loot uygulanmış ve uygulanmamış hallerde deterministic benzetim uygula.
+  // Çıktı: { deltaTTK, deltaSurvival } - TTK: time-to-kill (daha küçük daha iyi), Survival: 0..1 fark
+  private microSimulateLootEffect(state: GigaverseRunState, loot: any, rounds: number): { deltaTTK: number, deltaSurvival: number } {
+    // Kısa deterministic simülasyon: her round için en yüksek ATK hamlesini kullan (basitleştirilmiş)
+    const baseClone = this.fastClone(state);
+    const modClone = this.fastClone(state);
+    this.applyLootToClone(modClone, loot);
+
+    // Helper seçici: fighter için en yüksek öncelikli hamleyi döndür
+    const pickGreedyMove = (f: GigaverseFighter): MoveType | null => {
+      let best: { move: MoveType, val: number } | null = null;
+      const rockVal = (f.rock.currentCharges > 0) ? f.rock.currentATK : -Infinity;
+      const paperVal = (f.paper.currentCharges > 0) ? f.paper.currentATK : -Infinity;
+      const scissorVal = (f.scissor.currentCharges > 0) ? f.scissor.currentATK : -Infinity;
+      if (rockVal !== -Infinity) best = { move: MoveType.ROCK, val: rockVal };
+      if (paperVal !== -Infinity && (best === null || paperVal > best.val)) best = { move: MoveType.PAPER, val: paperVal };
+      if (scissorVal !== -Infinity && (best === null || scissorVal > best.val)) best = { move: MoveType.SCISSOR, val: scissorVal };
+      return best ? best.move : null;
+    };
+
+    const runSimulation = (clone: GigaverseRunState): { survived: boolean, roundsToKillEnemy: number } => {
+      let roundsToKill = 0;
+      for (let r = 0; r < rounds; r++) {
+        if (clone.player.health.current <= 0) break;
+        if (clone.currentEnemyIndex >= clone.enemies.length) break;
+        const enemy = clone.enemies[clone.currentEnemyIndex];
+        if (!enemy) break;
+
+        const pMove = pickGreedyMove(clone.player);
+        const eMove = pickGreedyMove(enemy);
+
+        // fallback: if null, use rock (consistent)
+        const pm = pMove ?? MoveType.ROCK;
+        const em = eMove ?? MoveType.ROCK;
+
+        this.applyRoundOutcome(clone, pm, em);
+
+        // advance enemy if dead
+        if (clone.enemies[clone.currentEnemyIndex] && clone.enemies[clone.currentEnemyIndex].health.current <= 0) {
+          clone.currentEnemyIndex++;
         }
 
-        let usefulness = 1.0;
-        if (isAtk) {
-            const armorPercent = p.armor.max > 0 ? p.armor.current / p.armor.max : 0;
-            if (armorPercent > 0.9) usefulness = 1.8;
-            else usefulness = 1.2;
-        } else {
-            if (currentStat < p.armor.max) usefulness = 1.5; 
-            else usefulness = 1.2;
-        }
+        roundsToKill++;
+      }
 
-        const powerValue = Math.pow(val, 2);
-        const WEAPON_BASE_MULTIPLIER = 30; 
+      const survived = clone.player.health.current > 0;
+      return { survived, roundsToKill };
+    };
 
-        let baseScore = 0;
-        if (charges > 0) {
-            const effectiveCharges = Math.min(charges, 3);
-            baseScore = powerValue * WEAPON_BASE_MULTIPLIER * effectiveCharges * buildMultiplier * usefulness + (currentStat * 2);
-        } else {
-            baseScore = powerValue * WEAPON_BASE_MULTIPLIER * 1.5 * buildMultiplier;
-        }
+    const baseRes = runSimulation(baseClone);
+    const modRes = runSimulation(modClone);
 
-        return baseScore * lowTierPenalty;
+    // deltaTTK: newTTK - oldTTK (pozitifse daha uzun sürmüş => kötü). Normalize: eğer enemy ölmedi simülasyonda, büyük pozitif penalty
+    let baseTTK = baseRes.roundsToKill;
+    let modTTK = modRes.roundsToKill;
+    if (baseRes.roundsToKill === 0 && (state.enemies[state.currentEnemyIndex] && state.enemies[state.currentEnemyIndex].health.current > 0)) {
+      baseTTK = rounds + 1;
     }
+    if (modRes.roundsToKill === 0 && (state.enemies[state.currentEnemyIndex] && state.enemies[state.currentEnemyIndex].health.current > 0)) {
+      modTTK = rounds + 1;
+    }
+    const deltaTTK = modTTK - baseTTK;
 
-    return 0;
+    // deltaSurvival: 1 if survived in mod and not in base, -1 if opposite, else 0 (coarse)
+    const baseSurv = baseRes.survived ? 1 : 0;
+    const modSurv = modRes.survived ? 1 : 0;
+    const deltaSurvival = modSurv - baseSurv;
+
+    return { deltaTTK, deltaSurvival };
   }
 
   // --- SAVAŞ MOTORU (LETHAL CHECK DAHİL) ---
