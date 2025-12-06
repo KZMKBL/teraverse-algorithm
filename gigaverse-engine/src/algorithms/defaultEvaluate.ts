@@ -5,78 +5,82 @@ import { GigaverseRunState, GigaverseFighter, GigaverseMoveState } from "../simu
 /**
  * Evaluates the state to give a numeric score.
  * Higher is better.
- * TUNED FOR DEFENSIVE PLAY: Prioritizes Armor and Health preservation.
+ * TUNED FOR: High Defense, Smart Aggression, Ammo Management.
  */
 export function defaultEvaluate(state: GigaverseRunState): number {
   const p = state.player;
   const e = state.enemies[state.currentEnemyIndex];
 
-  // 1. CRITICAL: DEATH CHECK
+  // 1. ÖLÜM KONTROLÜ (KRİTİK)
   if (p.health.current <= 0) return -1000000;
 
   let score = 0;
 
-  // 2. PROGRESSION (Winning is still the ultimate goal)
+  // 2. İLERLEME VE ZAFER
   score += state.currentEnemyIndex * 100000; 
 
+  // Eğer düşman öldüyse, zafer bonusunu al ve çık (Mermi/Zırh önemsizdir)
   if (!e || e.health.current <= 0) {
       score += 50000;
-      // If we won, return immediately with a bonus for remaining health
       return score + (p.health.current * 200); 
   }
 
-  // 3. DEFENSIVE METRICS (The Core Change)
+  // 3. HAYATTA KALMA (DEFANSİF ZEKA)
   
-  // Health is King: Massive multiplier to avoid ANY health loss
-  score += p.health.current * 300; 
+  // Can Puanı: Agresiflikten ölmeyi engellemek için yüksek çarpan.
+  score += p.health.current * 250; 
 
-  // Armor is Queen: High multiplier to keep armor up
-  // We also add a specific "Armor Integrity" bonus
-  score += p.armor.current * 100; 
+  // Zırh Puanı: Zırhı korumak çok önemlidir.
+  score += p.armor.current * 80; 
 
-  // ARMOR CRITICALITY: If armor is broken (0) or very low (< 20%), apply a heavy penalty.
-  // This forces the bot to recharge armor immediately.
+  // ZIRH KIRILMA CEZASI (EN ÖNEMLİ KISIM):
+  // Eğer zırh 0'a inerse, bot panikler (-5000 puan). 
+  // Bu sayede zırhı kırdırmamak için elinden geleni yapar.
   if (p.armor.current === 0) {
-      score -= 5000; // Panic! Get armor NOW!
+      score -= 5000; 
   } else if (p.armor.current < p.armor.max * 0.2) {
-      score -= 2000; // Warning! Armor is critical.
+      score -= 1500; // Zırh çok azaldı uyarısı
   }
 
-  // 4. OFFENSIVE METRICS (Aggression)
-  // We still need to kill the enemy, but we value it slightly less than survival.
+  // 4. SALDIRGANLIK (KONTROLLÜ)
+  // Düşmanın canını azaltmak iyidir ama kendi canımızdan değerli değildir.
   const damageDealt = e.health.max - e.health.current;
-  score += damageDealt * 100; // Reduced from 150 to 100
+  score += damageDealt * 120; 
 
+  // Zırh kırmak taktiksel avantajdır
   const armorBroken = e.armor.max - e.armor.current;
-  score += armorBroken * 40;
+  score += armorBroken * 50;  
 
-  // 5. ECONOMY (Ammo Management)
+  // 5. EKONOMİ (MERMİ YÖNETİMİ)
   const myMoves = [p.rock, p.paper, p.scissor];
   let myTotalStats = 0;
 
   for (const m of myMoves) {
       myTotalStats += m.currentATK + m.currentDEF;
 
-      // Penalize having NO ammo significantly to ensure we always have options
-      if (m.currentCharges === -1) score -= 800; 
-      else if (m.currentCharges === 0) score -= 200; // Increased penalty for 0 ammo
+      // Mermisiz kalmak savunmasız kalmaktır
+      if (m.currentCharges === -1) score -= 800; // Ceza
+      else if (m.currentCharges === 0) score -= 200; // Hafif Ceza
 
-      // Reward having ammo
-      if (m.currentCharges > 0) score += m.currentCharges * 20;
+      // Mermi biriktirmek iyidir (Diminishing Returns)
+      if (m.currentCharges === 1) score += 100;      // İlk mermi hayati
+      else if (m.currentCharges === 2) score += 140; // İkinci iyi
+      else if (m.currentCharges >= 3) score += 160;  // Full lüks
   }
   
+  // Geleceğe yatırım (Stat gücü)
   score += myTotalStats * 40;
 
-  // 6. THREAT ASSESSMENT
-  // If the enemy has ammo and high attack, we should be scared (lower score for this state).
+  // 6. TEHDİT ANALİZİ (THREAT ASSESSMENT)
+  // Düşmanın elinde mermi varsa kork, yoksa rahatla.
   const enemyMoves = [e.rock, e.paper, e.scissor];
   let threatScore = 0;
 
   for (const em of enemyMoves) {
       if (em.currentCharges > 0) {
-          // If enemy can attack, reduce our score based on their attack power.
-          // This makes "safe" states (where enemy has no ammo) much more attractive.
-          threatScore += (em.currentATK * 30); // Increased threat weight
+          // Düşmanın saldırı gücü kadar puan düşüyoruz.
+          // Düşmanın mermisini bitiren senaryolar (Drain) daha yüksek puan alacak.
+          threatScore += (em.currentATK * 30); 
       }
   }
   
