@@ -13,6 +13,7 @@ import {
 import { CustomLogger } from "../../types/CustomLogger";
 import { defaultLogger } from "../../utils/defaultLogger";
 import { defaultEvaluate } from "../defaultEvaluate";
+import { hybridEvaluate, evaluateLoot } from '@slkzgm/gigaverse-engine';
 
 export interface DPConfig {
   maxHorizon: number; 
@@ -65,83 +66,16 @@ export class DPAlgorithm implements IGigaverseAlgorithm {
     return result.bestAction;
   }
 
-  // --- LOOT SEÇİMİ ---
-  private pickBestLoot(state: GigaverseRunState): GigaverseAction {
-      let bestScore = -Infinity;
-      let bestIdx = 0;
-
-      for(let i=0; i < state.lootOptions.length; i++) {
-          const loot = state.lootOptions[i];
-          const score = this.getLootSynergyScore(state, loot);
-          
-          if(score > bestScore) {
-              bestScore = score;
-              bestIdx = i;
-          }
-      }
-
-      switch(bestIdx) {
-          case 0: return { type: GigaverseActionType.PICK_LOOT_ONE };
-          case 1: return { type: GigaverseActionType.PICK_LOOT_TWO };
-          case 2: return { type: GigaverseActionType.PICK_LOOT_THREE };
-          case 3: return { type: GigaverseActionType.PICK_LOOT_FOUR };
-          default: return { type: GigaverseActionType.PICK_LOOT_ONE };
-      }
-  }
-
-    // --- YENİ: LOOT SKORLAMASI (SDV + BUILD ANALYSIS + MICRO-SIM) ---
-  private getLootSynergyScore(state: GigaverseRunState, loot: any): number {
-    // 1) Temel: evaluate fonksiyonuyla state delta (SDV)
-    const baseDelta = this.computeStateDeltaValue(state, loot);
-
-    // 2) Build analizi: hangi silah/istat öne çıkıyor?
-    const buildPref = this.analyzeBuildPreference(state); // returns { rock: number, paper: number, scissor: number, hp: number, armor: number, charges: number }
-
-    // 3) Micro-simulation: kısa vadeli etkiler (3 tur)
-    const micro = this.microSimulateLootEffect(state, loot, 3);
-
-    // 4) Tür bazlı multipliers: loot tipini tespit et ve build ile eşleştir
-    const rawType = (loot.boonTypeString || "").toString();
-    const t = rawType.toLowerCase();
-    const isHeal = (rawType === "Heal" || t === "heal" || t.includes("potion")) && !t.includes("maxhealth") && !t.includes("addmaxhealth");
-    const isMaxHP = rawType === "AddMaxHealth" || t.includes("maxhealth") || t.includes("vitality") || t.includes("hp");
-    const isArmor = rawType === "AddMaxArmor" || t.includes("armor");
-    const isRock = rawType === "UpgradeRock" || t.includes("rock") || t.includes("sword");
-    const isPaper = rawType === "UpgradePaper" || t.includes("paper") || t.includes("shield");
-    const isScissor = rawType === "UpgradeScissor" || t.includes("scissor") || t.includes("spell") || t.includes("magic");
-
-    // baseScore başlangıç: evaluate delta
-    let score = baseDelta;
-
-    // Build preference multiplier: eğer loot tercih edilen statla uyuşuyorsa bonus ver
-    const prefBonusWeight = 1.0;
-    if (isRock) score += prefBonusWeight * 50 * buildPref.rock;
-    if (isPaper) score += prefBonusWeight * 50 * buildPref.paper;
-    if (isScissor) score += prefBonusWeight * 50 * buildPref.scissor;
-    if (isMaxHP) score += prefBonusWeight * 40 * buildPref.hp;
-    if (isArmor) score += prefBonusWeight * 40 * buildPref.armor;
-    if (isHeal) score += prefBonusWeight * 30 * (buildPref.hp + 0.5); // heal daha çok hp tercihine bağlıdır
-
-    // Micro-sim etkileri: ΔTTK (düşüş iyi) ve ΔSurvival (artış çok iyi)
-    // micro.deltaTTK: newTTK - oldTTK (negatifse TTK azalmış => iyi)
-    // micro.deltaSurvival: newSurv - oldSurv (pozitifse iyi)
-    const ttkFactor = 1200; // TTK farkını puana çevirme ölçeği
-    const survivalFactor = 4000; // survival farkını puana çevirme ölçeği (öncelikli)
-    score += -micro.deltaTTK * ttkFactor; // TTK azaldıysa pozitif katkı yap
-    score += micro.deltaSurvival * survivalFactor;
-
-    // Küçük bir taşıyıcı: charges veya +1 small upgrades için mantıklı ama aşırı cezalandırılmamış
-    const val1 = loot.selectedVal1 || 0;
-    const val2 = loot.selectedVal2 || 0;
-    // Eğer item weapon upgrade ise ve sadece +1 ise normal penalti yerine micro-sim kararına bak
-    if ((isRock || isPaper || isScissor) && (val1 === 1 || val2 === 1)) {
-      // +1'ler artık tamamen çöpe atılmıyor; micro-sim pozitifse değerli olabilir
-      score += Math.max(0, micro.deltaSurvival * 1000);
+ private pickBestLoot(state: GigaverseRunState): GigaverseAction {
+  let bestScore = -Infinity;
+  let bestIdx = 0;
+  for (let i = 0; i < state.lootOptions.length; i++) {
+    const loot = state.lootOptions[i];
+    const score = evaluateLoot(state, loot);
+    if (score > bestScore) {
+      bestScore = score;
+      bestIdx = i;
     }
-
-    // Son düzeltme: çok uç değerleri kırp (numerik stabilite)
-    if (!Number.isFinite(score)) score = -1e9;
-    return score;
   }
 
   // UYGULA: loot'u klon state'e uygular (basit fakat kapsayıcı)
