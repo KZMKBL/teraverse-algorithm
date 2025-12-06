@@ -49,12 +49,12 @@ export class DPAlgorithm implements IGigaverseAlgorithm {
   public pickAction(state: GigaverseRunState): GigaverseAction {
     this.memo.clear();
     
-    // LOOT PHASE: Saf Kurallar
+    // LOOT PHASE: Saf Kural Modu (Simulation Free)
     if (state.lootPhase) {
         return this.pickBestLoot(state);
     }
 
-    // COMBAT PHASE: Expectimax Simülasyonu
+    // COMBAT PHASE: Expectimax (Lethal Check Korumalı)
     const result = this.expectimaxSearch(state, this.config.maxHorizon);
     
     if (!result.bestAction) {
@@ -88,7 +88,7 @@ export class DPAlgorithm implements IGigaverseAlgorithm {
       }
   }
 
-  // --- PUANLAMA MOTORU (PERFECT FIT & OVERKILL FIX) ---
+  // --- PUANLAMA MOTORU ---
   private getLootSynergyScore(state: GigaverseRunState, loot: any): number {
     const p = state.player;
     const type = loot.boonTypeString; 
@@ -97,65 +97,47 @@ export class DPAlgorithm implements IGigaverseAlgorithm {
     const val2 = loot.selectedVal2 || 0;
 
     switch (type) {
-        // =====================================================
-        // 1. HEAL (İKSİR)
-        // =====================================================
+        // 1. HEAL
         case "Heal": {
             const current = p.health.current;
             const max = p.health.max;
             const missing = max - current;
 
-            // Can %100 ise ALMA (-Sonsuz)
             if (missing < 1) return -999999; 
-            
-            // Eğer Can %95 üzerindeyse alma
             if (current / max > 0.95) return -5000;
 
             const healAmount = val1;
             const effectiveHeal = Math.min(missing, healAmount);
             
-            // VERİMLİLİK KONTROLÜ (YENİ)
-            // Eğer boşa giden miktar çok azsa (Verimli Heal), puanı katla.
             const wasted = healAmount - effectiveHeal;
             let efficiencyBonus = 1.0;
-            
-            if (wasted === 0) efficiencyBonus = 10.0; // Hiç israf yoksa MÜKEMMEL!
-            else if (wasted < healAmount * 0.3) efficiencyBonus = 3.0; // Az israf varsa İYİ.
+            if (wasted === 0) efficiencyBonus = 10.0; 
+            else if (wasted < healAmount * 0.3) efficiencyBonus = 3.0;
 
-            // Aciliyet Hesabı
             const hpPercent = current / max;
             let urgency = 1;
-            if (hpPercent < 0.30) urgency = 50;      // Ölüyoruz
-            else if (hpPercent < 0.60) urgency = 10; // Yaralıyız
-            else urgency = 2;                        // Çizik var (Verimliyse alırız)
+            if (hpPercent < 0.30) urgency = 50;      
+            else if (hpPercent < 0.60) urgency = 10; 
+            else urgency = 2;                        
             
-            // Formül: Efektif Miktar * Aciliyet * Verimlilik
-            // Örn: 25/32 Can (+6 Heal). 
-            // Urgency(2) * Eff(6) * Bonus(10) = 120 Puan. (+1 Kılıcı ezer)
             return effectiveHeal * urgency * efficiencyBonus;
         }
 
-        // =====================================================
-        // 2. MAX HEALTH (TIER S) - KATSAYI 200
-        // =====================================================
+        // 2. MAX HEALTH
         case "AddMaxHealth": {
             let jackpot = 0;
             if (val1 >= 4) jackpot = 500;
             return (val1 * 200) + jackpot;
         }
 
-        // =====================================================
-        // 3. MAX ARMOR (TIER S) - KATSAYI 180
-        // =====================================================
+        // 3. MAX ARMOR
         case "AddMaxArmor": {
             let jackpot = 0;
             if (val1 >= 3) jackpot = 400;
             return (val1 * 180) + jackpot;
         }
 
-        // =====================================================
         // 4. SİLAH GELİŞTİRMELERİ
-        // =====================================================
         case "UpgradeRock":    
         case "UpgradePaper":   
         case "UpgradeScissor": 
@@ -163,8 +145,6 @@ export class DPAlgorithm implements IGigaverseAlgorithm {
             const isAtk = val1 > 0;
             const val = isAtk ? val1 : val2;
 
-            // +1 ÇÖP FİLTRESİ: NÜKLEER CEZA
-            // Puanı %99 sil. (0.01)
             let lowTierPenalty = 1.0;
             if (val === 1) lowTierPenalty = 0.01; 
 
@@ -186,30 +166,21 @@ export class DPAlgorithm implements IGigaverseAlgorithm {
                 buildMultiplier = 0.7; 
             }
 
-            // USEFULNESS (YENİLENMİŞ)
             let usefulness = 1.0;
             if (isAtk) {
                 const armorPercent = p.armor.max > 0 ? p.armor.current / p.armor.max : 0;
                 if (armorPercent > 0.9) usefulness = 1.8; 
                 else usefulness = 1.2;
             } else {
-                // DEFANS MANTIĞI:
                 const futureDef = currentStat + val;
-                
-                // TAŞMA KONTROLÜ (Soft Cap)
-                // Eskiden direkt 0.1 yapıyorduk. Şimdi "Ne kadarı işe yarıyor?" diye bakıyoruz.
                 if (futureDef > p.armor.max) {
                     const usefulAmount = Math.max(0, p.armor.max - currentStat);
-                    // Eğer eşyanın en az yarısı işe yarıyorsa, tamamen çöp değildir.
-                    if (usefulAmount > val / 2) {
-                        usefulness = 0.5; // Kısmen yararlı
-                    } else {
-                        usefulness = 0.05; // Çoğu çöp -> ALMA
-                    }
+                    if (usefulAmount > val / 2) usefulness = 0.5;
+                    else usefulness = 0.05;
                 } else if (futureDef === p.armor.max) {
-                    usefulness = 1.6; // Mükemmel
+                    usefulness = 1.6; 
                 } else {
-                    usefulness = 1.5; // Lazım
+                    usefulness = 1.5; 
                 }
             }
 
@@ -232,7 +203,7 @@ export class DPAlgorithm implements IGigaverseAlgorithm {
     }
   }
 
-  // --- SAVAŞ MOTORU ---
+  // --- SAVAŞ MOTORU (EXPECTIMAX + LETHAL CHECK) ---
   private expectimaxSearch(state: GigaverseRunState, depth: number): DPResult {
     if (depth <= 0 || state.player.health.current <= 0 || state.currentEnemyIndex >= state.enemies.length) {
       return { bestValue: this.config.evaluateFn(state), bestAction: null };
@@ -248,7 +219,9 @@ export class DPAlgorithm implements IGigaverseAlgorithm {
     let bestAct: GigaverseAction | null = null;
 
     for (const myAct of myActions) {
+      // Değişiklik Burada: Lethal Check içeren hesaplama
       const expectedValue = this.calculateExpectedValue(state, myAct, depth);
+      
       if (expectedValue > bestVal) {
         bestVal = expectedValue;
         bestAct = myAct;
@@ -274,6 +247,13 @@ export class DPAlgorithm implements IGigaverseAlgorithm {
       let totalWeightedScore = 0;
       const myMove = this.actionToMoveType(myAct);
 
+      // --- CELLAT KONTROLÜ (LETHAL CHECK) ---
+      // Eğer düşmanın HERHANGİ bir hamlesi beni öldürüyorsa, o ihtimali %100 kabul et.
+      // Yani ortalamaya bakma, "En kötü senaryo (Ölüm)" puanını döndür.
+      
+      let deathDetected = false;
+      let deathScore = -Infinity;
+
       for (const enemyMove of enemyMoves) {
           const nextState = this.fastClone(state);
           this.applyRoundOutcome(nextState, myMove, enemyMove);
@@ -284,8 +264,25 @@ export class DPAlgorithm implements IGigaverseAlgorithm {
           }
 
           const subResult = this.expectimaxSearch(nextState, depth - 1);
+          
+          // EĞER BU SENARYODA ÖLDÜYSEK:
+          // Puan -900.000'den küçükse (Evaluate fonksiyonumuzda ölüm -1.000.000 idi)
+          if (subResult.bestValue < -900000) {
+              deathDetected = true;
+              deathScore = subResult.bestValue;
+              // Döngüyü kırmaya gerek yok ama sonucu etkileyecek
+          }
+
           totalWeightedScore += (subResult.bestValue * probability);
       }
+
+      // EĞER ÖLÜM TEHLİKESİ VARSA:
+      // Ortalamayı boşver, direkt ölüm puanını döndür.
+      // Böylece bot, "Ya ölmezsem?" diye risk almaz.
+      if (deathDetected) {
+          return deathScore;
+      }
+
       return totalWeightedScore;
   }
 
