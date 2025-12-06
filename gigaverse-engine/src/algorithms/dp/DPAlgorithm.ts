@@ -49,12 +49,12 @@ export class DPAlgorithm implements IGigaverseAlgorithm {
   public pickAction(state: GigaverseRunState): GigaverseAction {
     this.memo.clear();
     
-    // LOOT PHASE: Saf Kural Modu (Simulation Free)
+    // LOOT PHASE: Tier Sistemli Seçim
     if (state.lootPhase) {
         return this.pickBestLoot(state);
     }
 
-    // COMBAT PHASE: Expectimax (Lethal Check Korumalı)
+    // COMBAT PHASE: Expectimax
     const result = this.expectimaxSearch(state, this.config.maxHorizon);
     
     if (!result.bestAction) {
@@ -71,8 +71,11 @@ export class DPAlgorithm implements IGigaverseAlgorithm {
 
       for(let i=0; i < state.lootOptions.length; i++) {
           const loot = state.lootOptions[i];
-          const score = this.getLootSynergyScore(state, loot);
+          const score = this.getLootTierScore(state, loot);
           
+          // Debug için (Hangi Tier'a girdiğini görmek istersen)
+          // this.logger.info(`Loot ${i}: ${loot.boonTypeString} => Puan: ${score}`);
+
           if(score > bestScore) {
               bestScore = score;
               bestIdx = i;
@@ -88,123 +91,86 @@ export class DPAlgorithm implements IGigaverseAlgorithm {
       }
   }
 
-  // --- PUANLAMA MOTORU (SAYI ODAKLI & HATA KORUMALI) ---
-  private getLootSynergyScore(state: GigaverseRunState, loot: any): number {
+  // --- TIER SİSTEMLİ PUANLAMA (KARIŞIKLIK YOK) ---
+  private getLootTierScore(state: GigaverseRunState, loot: any): number {
     const p = state.player;
+    const type = loot.boonTypeString; 
     
-    // Değerleri al
     const val1 = loot.selectedVal1 || 0;
     const val2 = loot.selectedVal2 || 0;
+
+    // --- BASE PUANLAR (RÜTBELER) ---
+    // Bu puanlar birbirine karışmayacak kadar uzak seçildi.
+    const TIER_S_PLUS = 10_000_000; // Efsanevi Statlar (+4 ve üzeri HP/Armor)
+    const TIER_S      =  5_000_000; // İyi Statlar (+2, +3 HP/Armor)
+    const TIER_A      =  1_000_000; // Standart Statlar (+1 HP/Armor)
+    const TIER_B      =    500_000; // Çok Güçlü Silahlar (+4 ve üzeri)
+    const TIER_C      =    100_000; // İyi Silahlar (+2, +3)
+    const TIER_D      =     10_000; // Acil İhtiyaç Heal
+    const TIER_F      =          0; // Çöp (+1 Silahlar, Gereksiz Heal)
+
+    // --- TİP ANALİZİ ---
     
-    // Eşyanın Toplam "Gücü" (Stat büyüklüğü)
-    // +2 Can -> Güç 2.
-    // +3 Atk / +0 Def -> Güç 3.
-    const rawPower = val1 + val2;
-
-    // --- ADIM 1: TABAN PUAN (SAYILARA GÖRE) ---
-    // İsmi ne olursa olsun, büyük sayı iyidir.
-    // +1 -> 10 Puan
-    // +2 -> 200 Puan (Karesiyle artan değer)
-    // +3 -> 450 Puan
-    // Bu sayede tanımsız +2 eşya, tanımlı +1 eşyayı her zaman yener.
-    let score = Math.pow(rawPower, 2) * 50; 
-
-    // +1 Eşyalar için Taban Puanı baştan öldür.
-    if (rawPower === 1) score = 5; 
-
-    // ---------------------------------------------------------
-    // ADIM 2: TİP ANALİZİ VE ÇARPANLAR
-    // ---------------------------------------------------------
-    const rawType = (loot.boonTypeString || "").toString();
-    const t = rawType.toLowerCase();
-
-    // TİP TESPİTİ (Basitleştirilmiş)
-    const isHeal = (t === "heal" || t.includes("potion")) && !t.includes("health"); // "Health" geçiyorsa Heal değildir!
-    
-    const isMaxHP = t.includes("health") || t.includes("vitality") || t.includes("hp");
-    const isArmor = t.includes("armor") || t.includes("shieldmax");
-    
-    const isRock = t.includes("rock") || t.includes("sword");
-    const isPaper = t.includes("paper") || (t.includes("shield") && !isArmor);
-    const isScissor = t.includes("scissor") || t.includes("spell") || t.includes("magic");
-
-    // --- DURUM A: HEAL (İSTİSNA) ---
-    // Heal bir stat değil, eylemdir. Özel hesap gerektirir.
-    if (isHeal) {
+    // 1. HEAL
+    if (type === "Heal") {
         const missing = p.health.max - p.health.current;
-        if (missing < 1) return -999999; // Can full
+        if (missing < 1) return -999999; // Can Full
         if (p.health.current / p.health.max > 0.90) return -5000;
 
-        // Aciliyet (Can azsa değeri artar)
-        const urgency = p.health.current < p.health.max * 0.5 ? 10 : 2;
-        return Math.min(missing, val1) * urgency * 5;
-    }
-
-    // --- DURUM B: TİP ÇARPANLARI ---
-    
-    if (isMaxHP) {
-        // Max HP en değerlisidir. Taban puanı x4 yap.
-        // +2 Health -> Taban(200) * 4 = 800 Puan.
-        score *= 4.0;
+        const healAmount = val1;
+        const effectiveHeal = Math.min(missing, healAmount);
         
-        // Jackpot
-        if (rawPower >= 4) score += 500;
-    }
-    else if (isArmor) {
-        // Max Armor çok iyidir. x3.5 yap.
-        // +2 Armor -> Taban(200) * 3.5 = 700 Puan.
-        score *= 3.5;
-    }
-    else if (isRock || isPaper || isScissor) {
-        // Silahlar. Taban puanı duruma göre ayarla.
-        
-        let buildMult = 1.0;
-        if (isRock || isPaper) buildMult = 1.5; // Güçlü silahlar
-        if (isScissor) buildMult = 0.8;         // Zayıf silah
-
-        // Zırh Doluluk Kontrolü
-        // Bu bir saldırı mı? (val1 > 0)
-        const isAtk = val1 > 0;
-        let usefulness = 1.0;
-
-        if (isAtk) {
-            // Zırh doluyken saldırı x1.5 daha değerlidir.
-            if (p.armor.current >= p.armor.max * 0.9) usefulness = 1.5;
+        // Sadece can kritikse değerlidir
+        if (p.health.current < p.health.max * 0.4) {
+            // Kritik durumdaysa Tier B ile yarışır (Silah yerine Can alabilir)
+            return TIER_B + (effectiveHeal * 1000); 
         } else {
-            // Defans eşyası. Zırh taşıyorsa cezalandır.
-            const currentItemStat = isRock ? p.rock.currentDEF : (isPaper ? p.paper.currentDEF : p.scissor.currentDEF);
-            if ((currentItemStat + rawPower) > p.armor.max) {
-                usefulness = 0.1; // BOŞA GİDER -> ÇÖP
-            } else {
-                usefulness = 1.5; // İhtiyaç var
-            }
+            // Değilse Tier D (Stat varken alma)
+            return TIER_D + (effectiveHeal * 100);
         }
-
-        score *= buildMult * usefulness;
-        
-        // Mermi Bonusu (Ufak etki)
-        let charges = 0;
-        if (isRock) charges = p.rock.currentCharges;
-        else if (isPaper) charges = p.paper.currentCharges;
-        else if (isScissor) charges = p.scissor.currentCharges;
-        
-        if (charges > 0) score *= 1.2;
-    }
-    else {
-        // TİP TANIMLANAMADI! (Burası senin sorunun çözümü)
-        // Ama puanı "Taban Puan" olarak kaldı.
-        // +2 Bilinmeyen Eşya -> 200 Puan.
-        // +1 Bilinen Kılıç -> ~10-15 Puan.
-        // KAZANAN: Bilinmeyen +2 Eşya.
-        
-        // Tanınmayan ama yüksek statlı eşyaya güvenelim.
-        score *= 1.0; 
     }
 
-    return score;
+    // 2. MAX HEALTH
+    if (type === "AddMaxHealth") {
+        const val = val1;
+        // +4 ve üzeri -> S+ (Kesin Al)
+        if (val >= 4) return TIER_S_PLUS + (val * 1000);
+        // +2, +3 -> S (Çok Değerli)
+        if (val >= 2) return TIER_S + (val * 1000);
+        // +1 -> A (Yine de silahtan değerlidir)
+        return TIER_A + (val * 1000);
+    }
+
+    // 3. MAX ARMOR
+    if (type === "AddMaxArmor") {
+        const val = val1;
+        // +4 ve üzeri -> S+
+        if (val >= 4) return TIER_S_PLUS + (val * 1000);
+        // +2, +3 -> S
+        if (val >= 2) return TIER_S + (val * 1000);
+        // +1 -> A
+        return TIER_A + (val * 1000);
+    }
+
+    // 4. SİLAHLAR
+    if (type === "UpgradeRock" || type === "UpgradePaper" || type === "UpgradeScissor") {
+        const isAtk = val1 > 0;
+        const val = isAtk ? val1 : val2;
+
+        // +1 SİLAH DİREKT TIER F (ÇÖP)
+        if (val <= 1) return TIER_F + val;
+
+        // +4 ve üzeri Silah -> Tier B (Max Stat yoksa alınır)
+        if (val >= 4) return TIER_B + (val * 1000);
+
+        // +2, +3 Silah -> Tier C (İdare eder)
+        return TIER_C + (val * 1000);
+    }
+
+    return 0;
   }
 
-  // --- SAVAŞ MOTORU (EXPECTIMAX + LETHAL CHECK) ---
+  // --- SAVAŞ MOTORU (DEĞİŞMEDİ) ---
   private expectimaxSearch(state: GigaverseRunState, depth: number): DPResult {
     if (depth <= 0 || state.player.health.current <= 0 || state.currentEnemyIndex >= state.enemies.length) {
       return { bestValue: this.config.evaluateFn(state), bestAction: null };
@@ -220,9 +186,7 @@ export class DPAlgorithm implements IGigaverseAlgorithm {
     let bestAct: GigaverseAction | null = null;
 
     for (const myAct of myActions) {
-      // Değişiklik Burada: Lethal Check içeren hesaplama
       const expectedValue = this.calculateExpectedValue(state, myAct, depth);
-      
       if (expectedValue > bestVal) {
         bestVal = expectedValue;
         bestAct = myAct;
@@ -248,10 +212,6 @@ export class DPAlgorithm implements IGigaverseAlgorithm {
       let totalWeightedScore = 0;
       const myMove = this.actionToMoveType(myAct);
 
-      // --- CELLAT KONTROLÜ (LETHAL CHECK) ---
-      // Eğer düşmanın HERHANGİ bir hamlesi beni öldürüyorsa, o ihtimali %100 kabul et.
-      // Yani ortalamaya bakma, "En kötü senaryo (Ölüm)" puanını döndür.
-      
       let deathDetected = false;
       let deathScore = -Infinity;
 
@@ -266,24 +226,15 @@ export class DPAlgorithm implements IGigaverseAlgorithm {
 
           const subResult = this.expectimaxSearch(nextState, depth - 1);
           
-          // EĞER BU SENARYODA ÖLDÜYSEK:
-          // Puan -900.000'den küçükse (Evaluate fonksiyonumuzda ölüm -1.000.000 idi)
           if (subResult.bestValue < -900000) {
               deathDetected = true;
               deathScore = subResult.bestValue;
-              // Döngüyü kırmaya gerek yok ama sonucu etkileyecek
           }
 
           totalWeightedScore += (subResult.bestValue * probability);
       }
 
-      // EĞER ÖLÜM TEHLİKESİ VARSA:
-      // Ortalamayı boşver, direkt ölüm puanını döndür.
-      // Böylece bot, "Ya ölmezsem?" diye risk almaz.
-      if (deathDetected) {
-          return deathScore;
-      }
-
+      if (deathDetected) return deathScore;
       return totalWeightedScore;
   }
 
