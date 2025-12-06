@@ -32,10 +32,81 @@ import { RunTabsPanel } from '@/app/(dashboard)/_components/run-tabs-panel'
 
 // --- ÖZEL LOGGER (BOTUN SESİNİ AÇIYORUZ) ---
 const browserLogger = {
-  info: (msg: string) => console.log(`%c[BOT] ${msg}`, 'color: #00ffff; font-weight: bold;'), // Camgöbeği
+  info: (msg: string) => console.log(`%c[BOT] ${msg}`, 'color: #00ffff; font-weight: bold;'),
   warn: (msg: string) => console.warn(`[BOT WARN] ${msg}`),
   error: (msg: string) => console.error(`[BOT ERROR] ${msg}`),
-  debug: (msg: string) => console.log(`%c[DEBUG] ${msg}`, 'color: #aaaaaa; font-style: italic;'), // Gri
+  debug: (msg: string) => console.log(`%c[DEBUG] ${msg}`, 'color: #aaaaaa; font-style: italic;`),
+}
+
+/**
+ * HYBRID EVALUATE
+ * - Taban olarak önceki defaultEvaluate mantığını uygular (hayatta kalma, ilerleme, threat, charges).
+ * - Eğer state.lootPhase ise hp/armor ağırlıklandırmasını biraz arttırır (loot kararlarında hassasiyet).
+ * - Bu fonksiyon DPAlgorithm'a geçirilir.
+ */
+function hybridEvaluate(state: any): number {
+  const p = state.player
+  const e = state.enemies[state.currentEnemyIndex]
+
+  // Death check
+  if (!p || p.health?.current <= 0) return -1000000
+
+  let score = 0
+
+  // Progress
+  score += (state.currentEnemyIndex || 0) * 25000
+
+  // If enemy dead (victory moment)
+  if (!e || e.health?.current <= 0) {
+    score += 40000
+    return score + (p.health.current * 250)
+  }
+
+  // Base survival emphasis
+  score += p.health.current * 300
+  score += (p.armor?.current || 0) * 120
+  if ((p.armor?.current || 0) === 0) score -= 800
+
+  // Damage dealt (moderate)
+  const damageDealt = (e.health?.max ?? 0) - (e.health?.current ?? 0)
+  score += damageDealt * 80
+  if (e.health.current <= 0) score += 30000 + (p.health.current * 300)
+
+  // Charges / ammo economy (sane bonuses)
+  const myMoves = [p.rock, p.paper, p.scissor]
+  let myTotalStats = 0
+  for (const m of myMoves) {
+    if (!m) continue
+    myTotalStats += (m.currentATK || 0) + (m.currentDEF || 0)
+    if ((m.currentCharges ?? 0) <= 0) score -= 120
+    else if (m.currentCharges === 1) score += 35
+    else if (m.currentCharges === 2) score += 60
+    else if ((m.currentCharges ?? 0) >= 3) score += 90
+  }
+  score += myTotalStats * 30
+
+  // Threat analysis
+  const enemyMoves = [e.rock, e.paper, e.scissor]
+  let threatScore = 0
+  for (const em of enemyMoves) {
+    if (!em) continue
+    if ((em.currentCharges ?? 0) > 0) threatScore += (em.currentATK || 0) * 25
+  }
+  score -= threatScore
+
+  // Risk aversion: when HP is low, be more defensive
+  const hpPercent = p.health.current / Math.max(1, p.health.max || 1)
+  if (hpPercent < 0.35) {
+    score -= (0.35 - hpPercent) * 2000
+  }
+
+  // LOOT-PHASE ADJUSTMENT (hybrid touch)
+  // If we're in loot phase, slightly favor hp/armor in evaluation so SDV reflects loot utility better.
+  if (state.lootPhase) {
+    score += (p.health.current * 0.5) + ((p.armor?.current || 0) * 0.25)
+  }
+
+  return score
 }
 
 export default function DashboardPage() {
@@ -94,6 +165,7 @@ export default function DashboardPage() {
     autoPlayRef.current = autoPlay
   }, [currentDungeonName, currentDungeonIsJuiced, autoPlay])
 
+  // Instantiate algorithm objects when selectedAlgorithm changes.
   useEffect(() => {
     algoRefs.current.mcts = null
     algoRefs.current.minimax = null
@@ -111,24 +183,25 @@ export default function DashboardPage() {
         algoRefs.current.minimax = new MinimaxAlgorithm({ maxDepth: 3 }, silentLogger)
         break
       case 'dp':
-        // BURAYI DEĞİŞTİRDİK: silentLogger yerine browserLogger kullanıyoruz!
-        // Ayrıca maxHorizon'u 6'ya çıkardık (Hız yaması sayesinde).
-        algoRefs.current.dp = new DPAlgorithm({ maxHorizon: 6 }, browserLogger)
+        // Use hybridEvaluate here. Also use browserLogger for better visibility in UI.
+        algoRefs.current.dp = new DPAlgorithm(
+          { maxHorizon: 6, evaluateFn: hybridEvaluate as any },
+          browserLogger as any
+        )
         break
       case 'greedy':
         algoRefs.current.greedy = new GreedyAlgorithm({ atkWeight: 2.0 }, silentLogger)
         break
-      // 'manual' has no special instantiation
       default:
         break
     }
   }, [selectedAlgorithm])
 
+  // Data loading: simplified dependencies to avoid repeated refetch.
   useEffect(() => {
     if (!bearerToken || !address) return
-    if (enemies.length === 0 && gameItems.length === 0) {
-      loadOffchainStatic(bearerToken)
-    }
+    // load static/offchain data once on mount
+    loadOffchainStatic(bearerToken)
     loadTodayDungeonData(bearerToken)
     loadDayProgress(bearerToken)
     loadEnergy(bearerToken)
@@ -136,23 +209,17 @@ export default function DashboardPage() {
     return () => {
       stopEnergyTimer()
     }
-  }, [
-    bearerToken,
-    address,
-    enemies,
-    gameItems,
-    loadOffchainStatic,
-    loadTodayDungeonData,
-    loadDayProgress,
-    loadEnergy,
-    stopEnergyTimer,
-  ])
+    // Intentionally only depends on bearerToken & address
+  }, [bearerToken, address, loadOffchainStatic, loadTodayDungeonData, loadDayProgress, loadEnergy, stopEnergyTimer])
 
+  // Fetch current dungeon state once mounted (and whenever bearerToken changes)
   useEffect(() => {
     if (!bearerToken) return
+    let mounted = true
     async function fetchOnMount() {
       setLocalError('')
       const result = await callGigaverseAction(fetchDungeonStateAction, bearerToken!)
+      if (!mounted) return
       if (!result.success && result.message) {
         setLocalError(result.message)
       } else if (result.data?.entity?.ID_CID) {
@@ -162,6 +229,7 @@ export default function DashboardPage() {
       }
     }
     fetchOnMount()
+    return () => { mounted = false }
   }, [bearerToken, todayDungeonsMap])
 
   const getAggregatedItemChanges = useCallback(() => {
@@ -219,12 +287,14 @@ export default function DashboardPage() {
     selectedAlgorithm,
   ])
 
+  // getRecommendedMove: read store once to avoid race conditions
   const getRecommendedMove = useCallback((): GigaverseActionType | null => {
-    const ds = useGigaverseStore.getState().dungeonState
+    const storeState = useGigaverseStore.getState()
+    const ds = storeState.dungeonState
     if (!ds?.run) return null
     if (selectedAlgorithm === 'manual') return null
 
-    // Random: pick any valid move at random.
+    // Random mode
     if (selectedAlgorithm === 'random') {
       const possible: GigaverseActionType[] = []
       if (ds.run?.lootPhase && ds.run.lootOptions?.length) {
@@ -247,7 +317,7 @@ export default function DashboardPage() {
       return possible[Math.floor(Math.random() * possible.length)]
     }
 
-    // Build the engine-friendly state
+    // Build engine-friendly state
     const actionData = buildGigaverseRunState(ds, useGameDataStore.getState().enemies)
 
     // MCTS
@@ -297,23 +367,33 @@ export default function DashboardPage() {
     [bearerToken]
   )
 
+  // runAutoPlayChain: safer loop with explicit step cap and improved break conditions
   const runAutoPlayChain = useCallback(async () => {
     if (isAutoPlayingRef.current) return
     isAutoPlayingRef.current = true
 
     try {
-      // Safety cap to avoid infinite loops
       let steps = 600
       while (autoPlayRef.current && steps > 0) {
+        // If run ended or no run present, refresh and break
         if (await checkRunOverAndRefresh()) break
+
         const move = getRecommendedMove()
-        // Stop if the algorithm has no move (like in the middle of manual usage)
-        if (!move) break
+        if (!move) {
+          // No move available — break out (maybe manual or inconsistent state)
+          break
+        }
 
         await handlePlayMove(move)
-        await new Promise((res) => setTimeout(res, 40)) // short delay
+
+        // Short delay only in dev to ease debugging; in prod we proceed as fast as API allows.
+        if (process.env.NODE_ENV === 'development') {
+          await new Promise((res) => setTimeout(res, 40))
+        }
+
         steps--
       }
+      // Final consistency check
       await checkRunOverAndRefresh()
     } catch (error) {
       console.error('[runAutoPlayChain] error:', error)
