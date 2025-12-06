@@ -16,6 +16,9 @@ import {
   GreedyAlgorithm,
   GigaverseActionType,
 } from '@slkzgm/gigaverse-engine'
+
+import { hybridEvaluate } from '@slkzgm/gigaverse-engine';
+
 import { silentLogger } from '@/utils/silentLogger'
 import type { GameItemBalanceChange } from '@slkzgm/gigaverse-sdk'
 import { useRunHistoryStore } from '@/store/useRunHistoryStore'
@@ -37,77 +40,6 @@ const browserLogger = {
   error: (msg: string) => console.error(`[BOT ERROR] ${msg}`),
   debug: (msg: string) => console.log(`%c[DEBUG] ${msg}`, 'color: #aaaaaa; font-style: italic;'),
 
-}
-
-/**
- * HYBRID EVALUATE
- * - Taban olarak önceki defaultEvaluate mantığını uygular (hayatta kalma, ilerleme, threat, charges).
- * - Eğer state.lootPhase ise hp/armor ağırlıklandırmasını biraz arttırır (loot kararlarında hassasiyet).
- * - Bu fonksiyon DPAlgorithm'a geçirilir.
- */
-function hybridEvaluate(state: any): number {
-  const p = state.player
-  const e = state.enemies[state.currentEnemyIndex]
-
-  // Death check
-  if (!p || p.health?.current <= 0) return -1000000
-
-  let score = 0
-
-  // Progress
-  score += (state.currentEnemyIndex || 0) * 25000
-
-  // If enemy dead (victory moment)
-  if (!e || e.health?.current <= 0) {
-    score += 40000
-    return score + (p.health.current * 250)
-  }
-
-  // Base survival emphasis
-  score += p.health.current * 300
-  score += (p.armor?.current || 0) * 120
-  if ((p.armor?.current || 0) === 0) score -= 800
-
-  // Damage dealt (moderate)
-  const damageDealt = (e.health?.max ?? 0) - (e.health?.current ?? 0)
-  score += damageDealt * 80
-  if (e.health.current <= 0) score += 30000 + (p.health.current * 300)
-
-  // Charges / ammo economy (sane bonuses)
-  const myMoves = [p.rock, p.paper, p.scissor]
-  let myTotalStats = 0
-  for (const m of myMoves) {
-    if (!m) continue
-    myTotalStats += (m.currentATK || 0) + (m.currentDEF || 0)
-    if ((m.currentCharges ?? 0) <= 0) score -= 120
-    else if (m.currentCharges === 1) score += 35
-    else if (m.currentCharges === 2) score += 60
-    else if ((m.currentCharges ?? 0) >= 3) score += 90
-  }
-  score += myTotalStats * 30
-
-  // Threat analysis
-  const enemyMoves = [e.rock, e.paper, e.scissor]
-  let threatScore = 0
-  for (const em of enemyMoves) {
-    if (!em) continue
-    if ((em.currentCharges ?? 0) > 0) threatScore += (em.currentATK || 0) * 25
-  }
-  score -= threatScore
-
-  // Risk aversion: when HP is low, be more defensive
-  const hpPercent = p.health.current / Math.max(1, p.health.max || 1)
-  if (hpPercent < 0.35) {
-    score -= (0.35 - hpPercent) * 2000
-  }
-
-  // LOOT-PHASE ADJUSTMENT (hybrid touch)
-  // If we're in loot phase, slightly favor hp/armor in evaluation so SDV reflects loot utility better.
-  if (state.lootPhase) {
-    score += (p.health.current * 0.5) + ((p.armor?.current || 0) * 0.25)
-  }
-
-  return score
 }
 
 export default function DashboardPage() {
