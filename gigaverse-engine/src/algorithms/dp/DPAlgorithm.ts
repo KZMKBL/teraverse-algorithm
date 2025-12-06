@@ -89,7 +89,7 @@ export class DPAlgorithm implements IGigaverseAlgorithm {
       }
   }
 
-  // --- PUANLAMA MOTORU (DÜZELTME 1 & 2 UYGULANDI, 3 İPTAL) ---
+  // --- (Mevcut) getLootSynergyScore'in aynısını kullandım, değiştirmek istersin söyle ---
   private getLootSynergyScore(state: GigaverseRunState, loot: any): number {
     const p = state.player;
     const rawType = (loot.boonTypeString || "").toString();
@@ -98,25 +98,13 @@ export class DPAlgorithm implements IGigaverseAlgorithm {
     const val1 = loot.selectedVal1 || 0;
     const val2 = loot.selectedVal2 || 0;
 
-    // --- DÜZELTME 1: KESİN TİP AYRIŞTIRMA ---
-    // "Health Upgrade" içindeki "Heal" tuzağını önler.
-    
-    // MAX HEALTH
     const isMaxHP = rawType === "AddMaxHealth" || t.includes("health") || t.includes("vitality") || t.includes("hp");
-
-    // MAX ARMOR
     const isArmor = rawType === "AddMaxArmor" || t.includes("armor");
-
-    // HEAL (İKSİR)
-    // Sadece "heal" veya "potion" ise VE MaxHP değilse.
     const isHeal = (rawType === "Heal" || t === "heal" || t.includes("potion")) && !isMaxHP;
-
-    // SİLAHLAR
     const isRock = rawType === "UpgradeRock" || t.includes("sword") || t.includes("rock");
     const isPaper = rawType === "UpgradePaper" || t.includes("shield") || t.includes("paper");
     const isScissor = rawType === "UpgradeScissor" || t.includes("spell") || t.includes("magic") || t.includes("scissor");
 
-    // === DURUM A: HEAL ===
     if (isHeal) {
         const current = p.health.current;
         const max = p.health.max;
@@ -135,29 +123,22 @@ export class DPAlgorithm implements IGigaverseAlgorithm {
         return effectiveHeal * urgency * 5;
     }
 
-    // === DURUM B: MAX HEALTH (TIER S) ===
     if (isMaxHP) {
         let jackpot = 0;
         if (val1 >= 4) jackpot = 500;
-        // +2 Health = 400 Puan
         return (val1 * 200) + jackpot;
     }
 
-    // === DURUM C: MAX ARMOR (TIER S) ===
     if (isArmor) {
         let jackpot = 0;
         if (val1 >= 3) jackpot = 400;
-        // +2 Armor = 360 Puan
         return (val1 * 180) + jackpot;
     }
 
-    // === DURUM D: SİLAH GELİŞTİRMELERİ ===
     if (isRock || isPaper || isScissor) {
         const isAtk = val1 > 0;
         const val = isAtk ? val1 : val2;
 
-        // --- DÜZELTME 2: +1 ÇÖP FİLTRESİ ---
-        // +1 Eşyaların puanını %90 kırpıyoruz.
         let lowTierPenalty = 1.0;
         if (val === 1) lowTierPenalty = 0.1; 
 
@@ -179,28 +160,21 @@ export class DPAlgorithm implements IGigaverseAlgorithm {
             buildMultiplier = 0.7; 
         }
 
-        // --- DÜZELTME 3 İPTAL EDİLDİ ---
-        // Zırh taşma kontrolü (Overkill) kaldırıldı.
-        // Bot zırhı dolu olsa bile, güçlü defans eşyasına normal muamele yapacak.
         let usefulness = 1.0;
         if (isAtk) {
             const armorPercent = p.armor.max > 0 ? p.armor.current / p.armor.max : 0;
             if (armorPercent > 0.9) usefulness = 1.8;
             else usefulness = 1.2;
         } else {
-            // Defans eşyası: Zırh dolu mu boş mu bakma, her türlü iyidir (1.5).
-            // Sadece kendi statımız Max Armor'u geçiyorsa hafif düşür (0.8 değil, 1.2 yapalım ki yine de alsın).
             if (currentStat < p.armor.max) usefulness = 1.5; 
-            else usefulness = 1.2; // Doluyken de almaya devam et
+            else usefulness = 1.2;
         }
 
         const powerValue = Math.pow(val, 2);
-        // Base Çarpan (Enflasyona karşı ayarlı)
         const WEAPON_BASE_MULTIPLIER = 30; 
 
         let baseScore = 0;
         if (charges > 0) {
-            // Charge Cap: Max 3 mermi üzerinden hesapla
             const effectiveCharges = Math.min(charges, 3);
             baseScore = powerValue * WEAPON_BASE_MULTIPLIER * effectiveCharges * buildMultiplier * usefulness + (currentStat * 2);
         } else {
@@ -241,24 +215,74 @@ export class DPAlgorithm implements IGigaverseAlgorithm {
     return res;
   }
 
+  /**
+   * Yeni: Düşman hareket dağılımı tahmini.
+   * Her potansiyel enemy move için kısa vadeli bir simülasyon yapıp
+   * ham-puan = (dmgToPlayer) - (dmgToEnemy) + (armorGainFactor)
+   * şeklinde bir fayda hesaplıyoruz. Daha yüksek fayda -> daha yüksek olasılık.
+   * Softmax ile normalize ediyoruz. Temperature ile rastgelelik kontrolü.
+   */
+  private estimateEnemyMoveDistribution(state: GigaverseRunState, myMove: MoveType): Map<MoveType, number> {
+    const enemy = state.enemies[state.currentEnemyIndex];
+    const moves: MoveType[] = [];
+    if (enemy.rock.currentCharges > 0) moves.push(MoveType.ROCK);
+    if (enemy.paper.currentCharges > 0) moves.push(MoveType.PAPER);
+    if (enemy.scissor.currentCharges > 0) moves.push(MoveType.SCISSOR);
+    if (moves.length === 0) moves.push(MoveType.ROCK);
+
+    const scores: number[] = [];
+    for (const em of moves) {
+      // simulate one round to estimate immediate outcomes
+      const clone = this.fastClone(state);
+      this.applyRoundOutcome(clone, myMove, em);
+
+      // after applying round, compute immediate heuristics
+      // dmg to player = originalPlayerHP - newPlayerHP
+      const origP = state.player.health.current;
+      const newP = clone.player.health.current;
+      const dmgToPlayer = Math.max(0, origP - newP);
+
+      // dmg to enemy = originalEnemyHP - newEnemyHP
+      const origE = state.enemies[state.currentEnemyIndex].health.current;
+      const newE = clone.enemies[clone.currentEnemyIndex].health.current;
+      const dmgToEnemy = Math.max(0, origE - newE);
+
+      // armor gain (positive for enemy) helps prefer defensive plays
+      const armorGainEnemy = clone.enemies[clone.currentEnemyIndex].armor.current - state.enemies[state.currentEnemyIndex].armor.current;
+
+      // enemy prefers moves that maximize (damage to player - damage to enemy + armorGain*factor)
+      const raw = (dmgToPlayer * 1.0) - (dmgToEnemy * 0.6) + (armorGainEnemy * 0.4);
+
+      scores.push(raw);
+    }
+
+    // softmax conversion
+    const temperature = 0.8; // lower => more deterministic
+    const exps = scores.map(s => Math.exp(s / Math.max(0.0001, temperature)));
+    const sum = exps.reduce((a,b) => a+b, 0);
+    const probs: number[] = exps.map(x => x / Math.max(1e-9, sum));
+
+    const map = new Map<MoveType, number>();
+    for (let i = 0; i < moves.length; i++) {
+      map.set(moves[i], probs[i]);
+    }
+    return map;
+  }
+
   private calculateExpectedValue(state: GigaverseRunState, myAct: GigaverseAction, depth: number): number {
       const enemy = state.enemies[state.currentEnemyIndex];
       if (!enemy || enemy.health.current <= 0) return this.config.evaluateFn(state);
 
-      const enemyMoves: MoveType[] = [];
-      if (enemy.rock.currentCharges > 0) enemyMoves.push(MoveType.ROCK);
-      if (enemy.paper.currentCharges > 0) enemyMoves.push(MoveType.PAPER);
-      if (enemy.scissor.currentCharges > 0) enemyMoves.push(MoveType.SCISSOR);
-      if (enemyMoves.length === 0) enemyMoves.push(MoveType.ROCK);
-
-      const probability = 1.0 / enemyMoves.length;
-      let totalWeightedScore = 0;
       const myMove = this.actionToMoveType(myAct);
 
+      // Yeni: düşman hamle dağılımını tahmin et
+      const enemyDist = this.estimateEnemyMoveDistribution(state, myMove);
+
+      let totalWeightedScore = 0;
       let deathDetected = false;
       let deathScore = -Infinity;
 
-      for (const enemyMove of enemyMoves) {
+      for (const [enemyMove, prob] of enemyDist.entries()) {
           const nextState = this.fastClone(state);
           this.applyRoundOutcome(nextState, myMove, enemyMove);
 
@@ -268,14 +292,17 @@ export class DPAlgorithm implements IGigaverseAlgorithm {
           }
 
           const subResult = this.expectimaxSearch(nextState, depth - 1);
-          
-          // Lethal Check: Ölüm riski varsa o puanı kaydet
+
+          // Lethal check: eğer alt yol kesin ölüm getiriyorsa bunu dikkate al
           if (subResult.bestValue < -900000) {
               deathDetected = true;
-              deathScore = subResult.bestValue;
+              // deathScore'e en "kötü" bulunan lethal sonucu al
+              if (subResult.bestValue > deathScore) {
+                deathScore = subResult.bestValue;
+              }
           }
 
-          totalWeightedScore += (subResult.bestValue * probability);
+          totalWeightedScore += subResult.bestValue * prob;
       }
 
       if (deathDetected) return deathScore;
