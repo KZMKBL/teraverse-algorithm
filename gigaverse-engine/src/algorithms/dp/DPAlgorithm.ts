@@ -64,156 +64,189 @@ export class DPAlgorithm implements IGigaverseAlgorithm {
   }
 
   private dpSearch(state: GigaverseRunState, depth: number): DPResult {
-    // 1. Bitiş Koşulları
-    if (
-      depth <= 0 ||
-      state.player.health.current <= 0 ||
-      state.currentEnemyIndex >= state.enemies.length
-    ) {
-      return { bestValue: this.config.evaluateFn(state), bestAction: null };
-    }
+  // 1) Terminal / base case
+  if (
+    depth <= 0 ||
+    state.player.health.current <= 0 ||
+    state.currentEnemyIndex >= state.enemies.length
+  ) {
+    return { bestValue: this.config.evaluateFn(state), bestAction: null };
+  }
 
-    // 2. Memoization (Hafıza Kontrolü)
-    const key = this.buildStateKey(state, depth);
-    if (this.memo.has(key)) {
-      return this.memo.get(key)!;
-    }
-
-    // 3. Olası Hamleleri Bul
-    const actions = this.getPossibleActions(state);
-    if (actions.length === 0) {
-      return { bestValue: this.config.evaluateFn(state), bestAction: null };
-    }
-
+  // 2) LOOT PHASE: tamamen bağımsız, geleceğe bakma
+  if (state.lootPhase && state.lootOptions && state.lootOptions.length > 0) {
     let bestVal = -Infinity;
     let bestAct: GigaverseAction | null = null;
 
-    // 4. Tüm Hamleleri Dene
+    const actions = this.getPossibleActions(state);
     for (const act of actions) {
-      const newSt = cloneDeep(state);
-      this.simulator.applyAction(newSt, act);
+      const lootIdx = this.getLootIndexFromAction(act);
+      if (lootIdx < 0 || !state.lootOptions[lootIdx]) continue;
 
-      // Düşman öldü mü? Sonraki düşmana geç (Simülatör bunu yapmıyorsa manuel yapıyoruz)
-      const enemy = newSt.enemies[newSt.currentEnemyIndex];
-      if (enemy && enemy.health.current <= 0) {
-        newSt.currentEnemyIndex++;
-      }
+      // Yalnızca anlık synergy skoru kullan
+      const score = this.getLootSynergyScore(state, state.lootOptions[lootIdx]);
 
-      // --- SİNERJİ & ZEKA BONUSU ---
-      // Simülasyon sonucuna ek olarak, "bu hamle mantıklı mı?" puanı ekliyoruz.
-      let heuristicBonus = 0;
-      if (state.lootPhase) {
-        const lootIndex = this.getLootIndexFromAction(act);
-        if (lootIndex !== -1 && state.lootOptions[lootIndex]) {
-            heuristicBonus = this.getLootSynergyScore(state, state.lootOptions[lootIndex]);
-        }
-      }
-      // -----------------------------
-
-      const sub = this.dpSearch(newSt, depth - 1);
-      
-      // Toplam Puan = (Gelecekteki Durum Puanı) + (Anlık Zeka Bonusu)
-      const totalScore = sub.bestValue + heuristicBonus;
-
-      if (totalScore > bestVal) {
-        bestVal = totalScore;
+      if (score > bestVal) {
+        bestVal = score;
         bestAct = act;
       }
     }
 
-    const res: DPResult = { bestValue: bestVal, bestAction: bestAct };
-    this.memo.set(key, res);
-    return res;
+    return { bestValue: bestVal, bestAction: bestAct };
   }
+
+  // 3) Normal DP (combat) — memoization ile
+  const key = this.buildStateKey(state, depth);
+  if (this.memo.has(key)) {
+    return this.memo.get(key)!;
+  }
+
+  const actions = this.getPossibleActions(state);
+  if (actions.length === 0) {
+    const val = this.config.evaluateFn(state);
+    const r: DPResult = { bestValue: val, bestAction: null };
+    this.memo.set(key, r);
+    return r;
+  }
+
+  let bestVal = -Infinity;
+  let bestAct: GigaverseAction | null = null;
+
+  for (const act of actions) {
+    // clone state and simulate action
+    const newSt = cloneDeep(state);
+    this.simulator.applyAction(newSt, act);
+
+    // if the simulator doesn't advance dead enemies automatically
+    const enemy = newSt.enemies[newSt.currentEnemyIndex];
+    if (enemy && enemy.health.current <= 0) {
+      newSt.currentEnemyIndex++;
+    }
+
+    // recurse
+    const sub = this.dpSearch(newSt, depth - 1);
+
+    // total score = future value (we intentionally do NOT add loot heuristic here,
+    // because loot decisions are handled only in lootPhase above)
+    const totalScore = sub.bestValue;
+
+    if (totalScore > bestVal) {
+      bestVal = totalScore;
+      bestAct = act;
+    }
+  }
+
+  const res: DPResult = { bestValue: bestVal, bestAction: bestAct };
+  this.memo.set(key, res);
+  return res;
+}
+
 
 /**
-   * Loot seçimlerinde botun IQ'sunu ve "Build" tercihini belirleyen fonksiyon.
-   * Rock/Paper tercih eder, Scissor'dan kaçınır.
-   */
-  private getLootSynergyScore(state: GigaverseRunState, loot: any): number {
-    const p = state.player;
-    const type = loot.boonTypeString;
-    let score = 0;
-  
-    switch (type) {
-      // --- CAN YÖNETİMİ ---
-      case "Heal": {
-        const missingHealth = p.health.max - p.health.current;
-        const healAmount = loot.selectedVal1 || 0;
-        if (missingHealth <= 0) return -5000;
-        
-        const effectiveHeal = Math.min(missingHealth, healAmount);
-        const urgencyMult = p.health.max / Math.max(1, p.health.current); 
-        
-        score += effectiveHeal * 5 * urgencyMult;
-        break;
-      }
-  
-      case "AddMaxHealth": {
-        // ESKİ: * 15 -> YENİ: * 40
-        // Max HP çok değerlidir, upgrade'e kolay kolay değişilmez.
-        score += (loot.selectedVal1 || 0) * 40; 
-        break;
-      }
-  
-      case "AddMaxArmor": {
-        // ESKİ: * 20 -> YENİ: * 60
-        // Armor oyundaki en kral stat olabilir (hasarı direkt düşüyor).
-        // +4 Armor (240 Puan), +3 Sword Def'i artık rahatça yener.
-        score += (loot.selectedVal1 || 0) * 60;
-        break;
-      }
-  
-      // --- SALDIRI / SAVUNMA GELİŞTİRMELERİ ---
-      case "UpgradeRock":
-      case "UpgradePaper":
-      case "UpgradeScissor": {
-        const isAtk = (loot.selectedVal1 || 0) > 0;
-        const val = isAtk ? loot.selectedVal1 : loot.selectedVal2;
-  
-        let charges = 0;
-        let currentStat = 0;
-        let buildMultiplier = 1.0;
+ * Sade, doğru ve mantıklı loot seçimi.
+ * Full can → heal alınmaz
+ * Max HP / Max Armor → her zaman alınabilir
+ */
+private getLootSynergyScore(state: GigaverseRunState, loot: any): number {
+  const p = state.player;
+  const type = loot.boonTypeString;
+  let score = 0;
 
-        if (type === "UpgradeRock") {
-            charges = p.rock.currentCharges;
-            currentStat = isAtk ? p.rock.currentATK : p.rock.currentDEF;
-            buildMultiplier = 2.0; // Favori
-        } else if (type === "UpgradePaper") {
-            charges = p.paper.currentCharges;
-            currentStat = isAtk ? p.paper.currentATK : p.paper.currentDEF;
-            buildMultiplier = 2.0; // Favori
-        } else if (type === "UpgradeScissor") {
-            charges = p.scissor.currentCharges;
-            currentStat = isAtk ? p.scissor.currentATK : p.scissor.currentDEF;
-            buildMultiplier = 0.3; // Zayıf
-        }
-  
-        if (charges > 0) {
-            // DÜZELTME BURADA:
-            // Eskiden "charges" ile direkt çarpıyorduk (10 mermi varsa x10 puan).
-            // Şimdi "Effective Charges" kullanıyoruz. En fazla 6 mermi varmış gibi davran.
-            // Böylece mermi sayısı sonsuza gitse bile puan patlaması yaşanmaz.
-            const effectiveChargeImpact = Math.min(charges, 6); 
-            
-            // Çarpanı da 5'ten 4'e çektim. 
-            score += val * effectiveChargeImpact * 4 * buildMultiplier;
-            
-            // Mevcut stat bonusunu biraz düşürdük.
-            score += currentStat * 1 * buildMultiplier;
-        } else {
-            score += val * 1 * buildMultiplier;
-        }
-        break;
+  switch (type) {
+
+    /** ---------------------
+     *  HEAL → sadece current health
+     * --------------------- */
+    case "Heal": {
+      const missing = p.health.max - p.health.current;
+
+      if (missing <= 0) {
+        // Full can → heal asla alınmaz
+        return -9999;
       }
 
-      default:
-        score += 20; 
-        break;
+      const healAmount = loot.selectedVal1 || 0;
+      const effective = Math.min(missing, healAmount);
+
+      // Can azaldıkça daha önemli
+      const urgency = (p.health.max / Math.max(1, p.health.current));
+
+      score += effective * 5 * urgency;
+      break;
     }
-  
-    return score;
+
+    /** ---------------------
+     *  MAX HEALTH → her zaman iyi
+     * --------------------- */
+    case "AddMaxHealth": {
+      const val = loot.selectedVal1 || 0;
+      score += val * 35;
+      break;
+    }
+
+    /** ---------------------
+     *  MAX ARMOR → her zaman iyi
+     * --------------------- */
+    case "AddMaxArmor": {
+      const val = loot.selectedVal1 || 0;
+      score += val * 45;
+      break;
+    }
+
+    /** ---------------------
+     *  STAT UPGRADES (ATK / DEF)
+     * --------------------- */
+    case "UpgradeRock":
+    case "UpgradePaper":
+    case "UpgradeScissor": {
+
+      const isAtk = (loot.selectedVal1 || 0) > 0;
+      const upgradeValue = isAtk ? loot.selectedVal1 : loot.selectedVal2;
+
+      let charges = 0;
+      let currentStat = 0;
+      let multiplier = 1.0;
+
+      if (type === "UpgradeRock") {
+        charges = p.rock.currentCharges;
+        currentStat = isAtk ? p.rock.currentATK : p.rock.currentDEF;
+        multiplier = 1.1;
+      }
+      if (type === "UpgradePaper") {
+        charges = p.paper.currentCharges;
+        currentStat = isAtk ? p.paper.currentATK : p.paper.currentDEF;
+        multiplier = 1.1;
+      }
+      if (type === "UpgradeScissor") {
+        charges = p.scissor.currentCharges;
+        currentStat = isAtk ? p.scissor.currentATK : p.scissor.currentDEF;
+        multiplier = 0.9;
+      }
+
+      // ATK upgrade → charges yoksa gereksiz
+      if (isAtk && charges <= 0) {
+        return -2000;
+      }
+
+      // Etkin charges (puan taşmasını engellemek için)
+      const eff = Math.min(charges, 5);
+
+      score += upgradeValue * (2 + eff) * multiplier;
+      score += currentStat * 1 * multiplier;
+
+      break;
+    }
+
+    /** ---------------------
+     *  Default
+     * --------------------- */
+    default:
+      score += 10;
   }
+
+  return score;
+}
+
 
   // Action tipinden Loot indexini bulur (0, 1, 2, 3)
   private getLootIndexFromAction(act: GigaverseAction): number {
