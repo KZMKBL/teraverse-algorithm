@@ -5,13 +5,16 @@ import { GigaverseRunState, GigaverseFighter, GigaverseMoveState } from "../simu
 /**
  * Evaluates the state to give a numeric score.
  * Higher is better.
- * TUNED FOR: High Defense, Smart Aggression, Ammo Management.
+ * OPTIMIZED FOR: Expectimax (Standard Version)
+ * Balance: Survival > Damage > Ammo Economy
  */
 export function defaultEvaluate(state: GigaverseRunState): number {
   const p = state.player;
   const e = state.enemies[state.currentEnemyIndex];
 
-  // 1. ÖLÜM KONTROLÜ (KRİTİK)
+  // 1. ÖLÜM KONTROLÜ (KIRMIZI ÇİZGİ)
+  // Eğer bu senaryoda ölüyorsak, puan -1 Milyon.
+  // Expectimax ortalama alsa bile bu kadar düşük puan o yolu seçtirmez.
   if (p.health.current <= 0) return -1000000;
 
   let score = 0;
@@ -19,68 +22,63 @@ export function defaultEvaluate(state: GigaverseRunState): number {
   // 2. İLERLEME VE ZAFER
   score += state.currentEnemyIndex * 100000; 
 
-  // Eğer düşman öldüyse, zafer bonusunu al ve çık (Mermi/Zırh önemsizdir)
+  // Düşman öldü mü? Harika!
   if (!e || e.health.current <= 0) {
       score += 50000;
-      return score + (p.health.current * 200); 
+      // Zafer anında ne kadar canımız kaldığı çok önemli
+      return score + (p.health.current * 500); 
   }
 
-  // 3. HAYATTA KALMA (DEFANSİF ZEKA)
+  // 3. HAYATTA KALMA (MUTLAK DEĞERLER)
+  // Oran (Ratio) kullanmıyoruz. 30 Can, 10 Candan iyidir.
   
-  // Can Puanı: Agresiflikten ölmeyi engellemek için yüksek çarpan.
-  score += p.health.current * 250; 
+  // Can: En değerli varlığımız.
+  score += p.health.current * 200; 
 
-  // Zırh Puanı: Zırhı korumak çok önemlidir.
-  score += p.armor.current * 80; 
+  // Zırh: Canın kalkanıdır.
+  score += p.armor.current * 100; 
 
-  // ZIRH KIRILMA CEZASI (EN ÖNEMLİ KISIM):
-  // Eğer zırh 0'a inerse, bot panikler (-5000 puan). 
-  // Bu sayede zırhı kırdırmamak için elinden geleni yapar.
+  // ZIRH KIRILMA TEHLİKESİ
+  // Zırh 0'a inerse savunmasız kalırız. Buna ceza veriyoruz.
   if (p.armor.current === 0) {
-      score -= 5000; 
-  } else if (p.armor.current < p.armor.max * 0.2) {
-      score -= 1500; // Zırh çok azaldı uyarısı
+      score -= 2000; 
   }
 
-  // 4. SALDIRGANLIK (KONTROLLÜ)
-  // Düşmanın canını azaltmak iyidir ama kendi canımızdan değerli değildir.
+  // 4. HASAR (AGGRESSION)
+  // Düşmanın canını ne kadar azalttık?
   const damageDealt = e.health.max - e.health.current;
-  score += damageDealt * 120; 
-
-  // Zırh kırmak taktiksel avantajdır
-  const armorBroken = e.armor.max - e.armor.current;
-  score += armorBroken * 50;  
+  score += damageDealt * 150; 
 
   // 5. EKONOMİ (MERMİ YÖNETİMİ)
+  // Mermi (Charge) durumuna göre puan veriyoruz.
   const myMoves = [p.rock, p.paper, p.scissor];
   let myTotalStats = 0;
 
   for (const m of myMoves) {
       myTotalStats += m.currentATK + m.currentDEF;
 
-      // Mermisiz kalmak savunmasız kalmaktır
-      if (m.currentCharges === -1) score -= 800; // Ceza
-      else if (m.currentCharges === 0) score -= 200; // Hafif Ceza
+      // Mermimiz 0 ise kötüdür, savunmasızız demektir.
+      if (m.currentCharges <= 0) score -= 300; 
 
-      // Mermi biriktirmek iyidir (Diminishing Returns)
-      if (m.currentCharges === 1) score += 100;      // İlk mermi hayati
-      else if (m.currentCharges === 2) score += 140; // İkinci iyi
-      else if (m.currentCharges >= 3) score += 160;  // Full lüks
+      // Mermimiz varsa iyidir (Ama 3'ten sonrası zaten dolmaz, max 3)
+      // İlk mermi çok değerlidir (+100), diğerleri bonus (+20).
+      if (m.currentCharges === 1) score += 100;
+      else if (m.currentCharges > 1) score += 120;
   }
   
-  // Geleceğe yatırım (Stat gücü)
-  score += myTotalStats * 40;
+  // Stat gücümüzü de hesaba katalım (Geleceğe yatırım)
+  score += myTotalStats * 50;
 
-  // 6. TEHDİT ANALİZİ (THREAT ASSESSMENT)
-  // Düşmanın elinde mermi varsa kork, yoksa rahatla.
+  // 6. TEHDİT ANALİZİ
+  // Düşmanın mermisi varsa (bize vurabilecekse) puanı biraz kıralım.
+  // Böylece bot, düşmanın mermisinin bittiği anları "Fırsat" olarak görür.
   const enemyMoves = [e.rock, e.paper, e.scissor];
   let threatScore = 0;
 
   for (const em of enemyMoves) {
       if (em.currentCharges > 0) {
-          // Düşmanın saldırı gücü kadar puan düşüyoruz.
-          // Düşmanın mermisini bitiren senaryolar (Drain) daha yüksek puan alacak.
-          threatScore += (em.currentATK * 30); 
+          // Düşmanın saldırı gücü kadar tehdit var
+          threatScore += (em.currentATK * 20); 
       }
   }
   
