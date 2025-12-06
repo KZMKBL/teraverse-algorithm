@@ -49,7 +49,7 @@ export class DPAlgorithm implements IGigaverseAlgorithm {
   public pickAction(state: GigaverseRunState): GigaverseAction {
     this.memo.clear();
     
-    // LOOT PHASE: Sadece Kurallar (Simulation Free)
+    // LOOT PHASE: Saf Kurallar
     if (state.lootPhase) {
         return this.pickBestLoot(state);
     }
@@ -88,61 +88,74 @@ export class DPAlgorithm implements IGigaverseAlgorithm {
       }
   }
 
-  // --- PUANLAMA MOTORU (ENFLASYON KORUMALI) ---
+  // --- PUANLAMA MOTORU (PERFECT FIT & OVERKILL FIX) ---
   private getLootSynergyScore(state: GigaverseRunState, loot: any): number {
     const p = state.player;
-    // SDK ID'si (Kesin Eşleşme)
     const type = loot.boonTypeString; 
     
     const val1 = loot.selectedVal1 || 0;
     const val2 = loot.selectedVal2 || 0;
 
     switch (type) {
-        // -----------------------------------------------------
+        // =====================================================
         // 1. HEAL (İKSİR)
-        // -----------------------------------------------------
+        // =====================================================
         case "Heal": {
             const current = p.health.current;
             const max = p.health.max;
             const missing = max - current;
 
+            // Can %100 ise ALMA (-Sonsuz)
             if (missing < 1) return -999999; 
-            if (current / max > 0.90) return -5000;
+            
+            // Eğer Can %95 üzerindeyse alma
+            if (current / max > 0.95) return -5000;
 
-            const effectiveHeal = Math.min(missing, val1);
+            const healAmount = val1;
+            const effectiveHeal = Math.min(missing, healAmount);
+            
+            // VERİMLİLİK KONTROLÜ (YENİ)
+            // Eğer boşa giden miktar çok azsa (Verimli Heal), puanı katla.
+            const wasted = healAmount - effectiveHeal;
+            let efficiencyBonus = 1.0;
+            
+            if (wasted === 0) efficiencyBonus = 10.0; // Hiç israf yoksa MÜKEMMEL!
+            else if (wasted < healAmount * 0.3) efficiencyBonus = 3.0; // Az israf varsa İYİ.
+
+            // Aciliyet Hesabı
             const hpPercent = current / max;
             let urgency = 1;
-            if (hpPercent < 0.30) urgency = 50;      
-            else if (hpPercent < 0.50) urgency = 10; 
+            if (hpPercent < 0.30) urgency = 50;      // Ölüyoruz
+            else if (hpPercent < 0.60) urgency = 10; // Yaralıyız
+            else urgency = 2;                        // Çizik var (Verimliyse alırız)
             
-            return effectiveHeal * urgency * 5;
+            // Formül: Efektif Miktar * Aciliyet * Verimlilik
+            // Örn: 25/32 Can (+6 Heal). 
+            // Urgency(2) * Eff(6) * Bonus(10) = 120 Puan. (+1 Kılıcı ezer)
+            return effectiveHeal * urgency * efficiencyBonus;
         }
 
-        // -----------------------------------------------------
+        // =====================================================
         // 2. MAX HEALTH (TIER S) - KATSAYI 200
-        // -----------------------------------------------------
+        // =====================================================
         case "AddMaxHealth": {
             let jackpot = 0;
             if (val1 >= 4) jackpot = 500;
-            
-            // +2 Can = 400 Puan
             return (val1 * 200) + jackpot;
         }
 
-        // -----------------------------------------------------
+        // =====================================================
         // 3. MAX ARMOR (TIER S) - KATSAYI 180
-        // -----------------------------------------------------
+        // =====================================================
         case "AddMaxArmor": {
             let jackpot = 0;
             if (val1 >= 3) jackpot = 400;
-            
-            // +2 Zırh = 360 Puan
             return (val1 * 180) + jackpot;
         }
 
-        // -----------------------------------------------------
-        // 4. SİLAH GELİŞTİRMELERİ (BASE 10 - DÜŞÜK ENFLASYON)
-        // -----------------------------------------------------
+        // =====================================================
+        // 4. SİLAH GELİŞTİRMELERİ
+        // =====================================================
         case "UpgradeRock":    
         case "UpgradePaper":   
         case "UpgradeScissor": 
@@ -150,9 +163,10 @@ export class DPAlgorithm implements IGigaverseAlgorithm {
             const isAtk = val1 > 0;
             const val = isAtk ? val1 : val2;
 
-            // +1 ÇÖP FİLTRESİ: %95 Puan Silme
+            // +1 ÇÖP FİLTRESİ: NÜKLEER CEZA
+            // Puanı %99 sil. (0.01)
             let lowTierPenalty = 1.0;
-            if (val === 1) lowTierPenalty = 0.05; 
+            if (val === 1) lowTierPenalty = 0.01; 
 
             let charges = 0;
             let currentStat = 0;
@@ -172,17 +186,26 @@ export class DPAlgorithm implements IGigaverseAlgorithm {
                 buildMultiplier = 0.7; 
             }
 
-            // USEFULNESS (Zırh Taşma Kontrolü)
+            // USEFULNESS (YENİLENMİŞ)
             let usefulness = 1.0;
             if (isAtk) {
                 const armorPercent = p.armor.max > 0 ? p.armor.current / p.armor.max : 0;
                 if (armorPercent > 0.9) usefulness = 1.8; 
                 else usefulness = 1.2;
             } else {
+                // DEFANS MANTIĞI:
                 const futureDef = currentStat + val;
-                // OVERKILL CHECK
+                
+                // TAŞMA KONTROLÜ (Soft Cap)
+                // Eskiden direkt 0.1 yapıyorduk. Şimdi "Ne kadarı işe yarıyor?" diye bakıyoruz.
                 if (futureDef > p.armor.max) {
-                    usefulness = 0.1; // Çöp
+                    const usefulAmount = Math.max(0, p.armor.max - currentStat);
+                    // Eğer eşyanın en az yarısı işe yarıyorsa, tamamen çöp değildir.
+                    if (usefulAmount > val / 2) {
+                        usefulness = 0.5; // Kısmen yararlı
+                    } else {
+                        usefulness = 0.05; // Çoğu çöp -> ALMA
+                    }
                 } else if (futureDef === p.armor.max) {
                     usefulness = 1.6; // Mükemmel
                 } else {
@@ -191,7 +214,6 @@ export class DPAlgorithm implements IGigaverseAlgorithm {
             }
 
             const powerValue = Math.pow(val, 2);
-            // ENFLASYON AYARI: 45 -> 10'a düşürüldü.
             const WEAPON_BASE_MULTIPLIER = 10; 
 
             let baseScore = 0;
