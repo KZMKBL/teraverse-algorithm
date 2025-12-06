@@ -16,9 +16,6 @@ import {
   GreedyAlgorithm,
   GigaverseActionType,
 } from '@slkzgm/gigaverse-engine'
-
-import { hybridEvaluate } from '@slkzgm/gigaverse-engine';
-
 import { silentLogger } from '@/utils/silentLogger'
 import type { GameItemBalanceChange } from '@slkzgm/gigaverse-sdk'
 import { useRunHistoryStore } from '@/store/useRunHistoryStore'
@@ -32,15 +29,6 @@ import { DungeonList } from '@/app/(dashboard)/_components/dungeon-list'
 import { RunRecapPanel } from '@/app/(dashboard)/_components/run-recap-panel'
 import { RomManagerPanel } from '@/app/(dashboard)/_components/rom-manager-panel'
 import { RunTabsPanel } from '@/app/(dashboard)/_components/run-tabs-panel'
-
-// --- ÖZEL LOGGER (BOTUN SESİNİ AÇIYORUZ) ---
-const browserLogger = {
-  info: (msg: string) => console.log(`%c[BOT] ${msg}`, 'color: #00ffff; font-weight: bold;'),
-  warn: (msg: string) => console.warn(`[BOT WARN] ${msg}`),
-  error: (msg: string) => console.error(`[BOT ERROR] ${msg}`),
-  debug: (msg: string) => console.log(`%c[DEBUG] ${msg}`, 'color: #aaaaaa; font-style: italic;'),
-
-}
 
 export default function DashboardPage() {
   const { bearerToken } = useAuthStore()
@@ -98,7 +86,6 @@ export default function DashboardPage() {
     autoPlayRef.current = autoPlay
   }, [currentDungeonName, currentDungeonIsJuiced, autoPlay])
 
-  // Instantiate algorithm objects when selectedAlgorithm changes.
   useEffect(() => {
     algoRefs.current.mcts = null
     algoRefs.current.minimax = null
@@ -116,25 +103,22 @@ export default function DashboardPage() {
         algoRefs.current.minimax = new MinimaxAlgorithm({ maxDepth: 3 }, silentLogger)
         break
       case 'dp':
-        // Use hybridEvaluate here. Also use browserLogger for better visibility in UI.
-        algoRefs.current.dp = new DPAlgorithm(
-          { maxHorizon: 6, evaluateFn: hybridEvaluate as any },
-          browserLogger as any
-        )
+        algoRefs.current.dp = new DPAlgorithm({ maxHorizon: 4 }, silentLogger)
         break
       case 'greedy':
         algoRefs.current.greedy = new GreedyAlgorithm({ atkWeight: 2.0 }, silentLogger)
         break
+      // 'manual' has no special instantiation
       default:
         break
     }
   }, [selectedAlgorithm])
 
-  // Data loading: simplified dependencies to avoid repeated refetch.
   useEffect(() => {
     if (!bearerToken || !address) return
-    // load static/offchain data once on mount
-    loadOffchainStatic(bearerToken)
+    if (enemies.length === 0 && gameItems.length === 0) {
+      loadOffchainStatic(bearerToken)
+    }
     loadTodayDungeonData(bearerToken)
     loadDayProgress(bearerToken)
     loadEnergy(bearerToken)
@@ -142,17 +126,23 @@ export default function DashboardPage() {
     return () => {
       stopEnergyTimer()
     }
-    // Intentionally only depends on bearerToken & address
-  }, [bearerToken, address, loadOffchainStatic, loadTodayDungeonData, loadDayProgress, loadEnergy, stopEnergyTimer])
+  }, [
+    bearerToken,
+    address,
+    enemies,
+    gameItems,
+    loadOffchainStatic,
+    loadTodayDungeonData,
+    loadDayProgress,
+    loadEnergy,
+    stopEnergyTimer,
+  ])
 
-  // Fetch current dungeon state once mounted (and whenever bearerToken changes)
   useEffect(() => {
     if (!bearerToken) return
-    let mounted = true
     async function fetchOnMount() {
       setLocalError('')
       const result = await callGigaverseAction(fetchDungeonStateAction, bearerToken!)
-      if (!mounted) return
       if (!result.success && result.message) {
         setLocalError(result.message)
       } else if (result.data?.entity?.ID_CID) {
@@ -162,7 +152,6 @@ export default function DashboardPage() {
       }
     }
     fetchOnMount()
-    return () => { mounted = false }
   }, [bearerToken, todayDungeonsMap])
 
   const getAggregatedItemChanges = useCallback(() => {
@@ -220,14 +209,12 @@ export default function DashboardPage() {
     selectedAlgorithm,
   ])
 
-  // getRecommendedMove: read store once to avoid race conditions
   const getRecommendedMove = useCallback((): GigaverseActionType | null => {
-    const storeState = useGigaverseStore.getState()
-    const ds = storeState.dungeonState
+    const ds = useGigaverseStore.getState().dungeonState
     if (!ds?.run) return null
     if (selectedAlgorithm === 'manual') return null
 
-    // Random mode
+    // Random: pick any valid move at random.
     if (selectedAlgorithm === 'random') {
       const possible: GigaverseActionType[] = []
       if (ds.run?.lootPhase && ds.run.lootOptions?.length) {
@@ -250,7 +237,7 @@ export default function DashboardPage() {
       return possible[Math.floor(Math.random() * possible.length)]
     }
 
-    // Build engine-friendly state
+    // Build the engine-friendly state
     const actionData = buildGigaverseRunState(ds, useGameDataStore.getState().enemies)
 
     // MCTS
@@ -300,33 +287,23 @@ export default function DashboardPage() {
     [bearerToken]
   )
 
-  // runAutoPlayChain: safer loop with explicit step cap and improved break conditions
   const runAutoPlayChain = useCallback(async () => {
     if (isAutoPlayingRef.current) return
     isAutoPlayingRef.current = true
 
     try {
+      // Safety cap to avoid infinite loops
       let steps = 600
       while (autoPlayRef.current && steps > 0) {
-        // If run ended or no run present, refresh and break
         if (await checkRunOverAndRefresh()) break
-
         const move = getRecommendedMove()
-        if (!move) {
-          // No move available — break out (maybe manual or inconsistent state)
-          break
-        }
+        // Stop if the algorithm has no move (like in the middle of manual usage)
+        if (!move) break
 
         await handlePlayMove(move)
-
-        // Short delay only in dev to ease debugging; in prod we proceed as fast as API allows.
-        if (process.env.NODE_ENV === 'development') {
-          await new Promise((res) => setTimeout(res, 40))
-        }
-
+        await new Promise((res) => setTimeout(res, 40)) // short delay
         steps--
       }
-      // Final consistency check
       await checkRunOverAndRefresh()
     } catch (error) {
       console.error('[runAutoPlayChain] error:', error)
