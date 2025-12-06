@@ -158,22 +158,29 @@ private getLootSynergyScore(state: GigaverseRunState, loot: any): number {
      *  HEAL → sadece current health
      * --------------------- */
     case "Heal": {
-      const missing = p.health.max - p.health.current;
+    const missing = p.health.max - p.health.current;
 
-      if (missing <= 0) {
-        // Full can → heal asla alınmaz
-        return -9999;
-      }
+    // 🔥 1) Full can → asla heal yok
+    if (missing <= 0) return -99999;
 
-      const healAmount = loot.selectedVal1 || 0;
-      const effective = Math.min(missing, healAmount);
+    // 🔥 2) Eğer heal miktarı missing'den küçükse efektiviteyi arttır
+    const healAmount = loot.selectedVal1 || 0;
+    if (healAmount <= 0) return -99999;
 
-      // Can azaldıkça daha önemli
-      const urgency = (p.health.max / Math.max(1, p.health.current));
+    // 🔥 3) Anormal durumlarda (simülasyonda health yanlış görünüyorsa)
+    // DP loot kararını etkileyemez → heal'i NEGATIF yap
+    if (p.health.current === p.health.max) return -99999;
+    if (p.health.current > p.health.max) return -99999;
+    if (missing < 0) return -99999;
 
-      score += effective * 5 * urgency;
-      break;
-    }
+    const effective = Math.min(missing, healAmount);
+
+    // Missing health ne kadar yüksekse o kadar değerli
+    const urgency = p.health.max / Math.max(1, p.health.current);
+
+    return effective * 6 * urgency;
+}
+
 
     /** ---------------------
      *  MAX HEALTH → her zaman iyi
