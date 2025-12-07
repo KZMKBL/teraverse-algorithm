@@ -147,112 +147,105 @@ export class DPAlgorithm implements IGigaverseAlgorithm {
  * Full can → heal alınmaz
  * Max HP / Max Armor → her zaman alınabilir
  */
-private getLootSynergyScore(state: GigaverseRunState, loot: any): number {
-  const p = state.player;
-  const type = loot.boonTypeString;
-  let score = 0;
+// --- TABLO BAZLI (TIER LIST) PUANLAMA MOTORU ---
+  private getLootSynergyScore(state: GigaverseRunState, loot: any): number {
+    const p = state.player;
+    const type = loot.boonTypeString;
+    
+    // Değeri al (Saldırı veya Defans)
+    const isAtk = (loot.selectedVal1 || 0) > 0;
+    const val = isAtk ? loot.selectedVal1 : loot.selectedVal2;
 
-  switch (type) {
+    // --- TABLO: STAT DEĞERİNE GÖRE PUAN (BASE SCORE TABLE) ---
+    // Bu tablo sayesinde +7'nin değeri +4'ten kat kat fazla olur.
+    // +1'in değeri ise diplerde olur.
+    let baseScore = 0;
+    if (val <= 1) baseScore = 5;          // Çöp
+    else if (val === 2) baseScore = 200;  // İdare Eder
+    else if (val === 3) baseScore = 500;  // İyi
+    else if (val === 4) baseScore = 1200; // Çok İyi
+    else if (val === 5) baseScore = 2500; // Harika
+    else if (val >= 6) baseScore = 10000; // Efsanevi (Kesin Al)
 
-    /** ---------------------
-     *  HEAL → sadece current health
-     * --------------------- */
-    case "Heal": {
-    const missing = p.health.max - p.health.current;
+    let finalScore = 0;
 
-    // 🔥 1) Full can → asla heal yok
-    if (missing <= 0) return -99999;
+    switch (type) {
+      // --- CAN YÖNETİMİ ---
+      case "Heal": {
+        const missingHealth = p.health.max - p.health.current;
+        const healAmount = val; // Heal için val1 kullanılıyor
+        
+        if (missingHealth <= 0) return -5000; // Can full ise ALMA
+        
+        // Heal için özel tablo: Ne kadar çok heal, o kadar iyi ama aciliyete bağlı.
+        const effectiveHeal = Math.min(missingHealth, healAmount);
+        
+        // Aciliyet Çarpanı
+        let urgency = 1;
+        const hpPercent = p.health.current / p.health.max;
+        if (hpPercent < 0.30) urgency = 20;      // Ölüyoruz
+        else if (hpPercent < 0.50) urgency = 5;  // Lazım
+        else urgency = 0.5;                      // Keyfi
 
-    // 🔥 2) Eğer heal miktarı missing'den küçükse efektiviteyi arttır
-    const healAmount = loot.selectedVal1 || 0;
-    if (healAmount <= 0) return -99999;
+        // Heal Formülü: (Miktar * 50) * Aciliyet
+        // Örn: +6 Heal, Acil Durumda -> 300 * 20 = 6000 Puan (Her silahı geçer)
+        finalScore = effectiveHeal * 50 * urgency;
+        break;
+      }
+  
+      // --- MAX HP (TIER S) ---
+      case "AddMaxHealth": {
+        // Can her şeyden değerlidir. Tablo puanını x2 yap.
+        // +2 Health -> 200 * 2 = 400 Puan.
+        // +7 Health -> 10000 * 2 = 20000 Puan.
+        finalScore = baseScore * 2.0; 
+        break;
+      }
+  
+      // --- MAX ARMOR (TIER A) ---
+      case "AddMaxArmor": {
+        // Zırh çok değerlidir. Tablo puanını x1.8 yap.
+        // +2 Armor -> 200 * 1.8 = 360 Puan.
+        finalScore = baseScore * 1.8;
+        break;
+      }
+  
+      // --- SİLAHLAR ---
+      case "UpgradeRock":
+      case "UpgradePaper":
+      case "UpgradeScissor": {
+        let buildMultiplier = 1.0;
+        let charges = 0;
 
-    // 🔥 3) Anormal durumlarda (simülasyonda health yanlış görünüyorsa)
-    // DP loot kararını etkileyemez → heal'i NEGATIF yap
-    if (p.health.current === p.health.max) return -99999;
-    if (p.health.current > p.health.max) return -99999;
-    if (missing < 0) return -99999;
+        if (type === "UpgradeRock") {
+            charges = p.rock.currentCharges;
+            buildMultiplier = 2.0; // Favori
+        } else if (type === "UpgradePaper") {
+            charges = p.paper.currentCharges;
+            buildMultiplier = 2.0; // Favori
+        } else if (type === "UpgradeScissor") {
+            charges = p.scissor.currentCharges;
+            buildMultiplier = 0.5; // Zayıf
+        }
 
-    const effective = Math.min(missing, healAmount);
+        // Mermi Etkisi: Mermimiz varsa silahın değeri biraz artar (x1.2), yoksa düşer (x0.8)
+        let chargeBonus = (charges > 0) ? 1.2 : 0.8;
 
-    // Missing health ne kadar yüksekse o kadar değerli
-    const urgency = p.health.max / Math.max(1, p.health.current);
+        // Silah Puanı: Tablo Puanı * Build * Mermi
+        // +2 Kılıç (Favori, Mermili) -> 200 * 2.0 * 1.2 = 480 Puan.
+        // +3 Kılıç -> 500 * 2.0 * 1.2 = 1200 Puan.
+        finalScore = baseScore * buildMultiplier * chargeBonus;
+        
+        break;
+      }
 
-    return effective * 6 * urgency;
-}
-
-
-    /** ---------------------
-     *  MAX HEALTH → her zaman iyi
-     * --------------------- */
-    case "AddMaxHealth": {
-      const val = loot.selectedVal1 || 0;
-      score += val * 35;
-      break;
+      default:
+        finalScore = 20; 
+        break;
     }
-
-    /** ---------------------
-     *  MAX ARMOR → her zaman iyi
-     * --------------------- */
-    case "AddMaxArmor": {
-      const val = loot.selectedVal1 || 0;
-      score += val * 45;
-      break;
-    }
-
-    /** ---------------------
-     *  STAT UPGRADES (ATK / DEF)
-     * --------------------- */
-    case "UpgradeRock":
-    case "UpgradePaper":
-    case "UpgradeScissor": {
-
-      const isAtk = (loot.selectedVal1 || 0) > 0;
-      const upgradeValue = isAtk ? loot.selectedVal1 : loot.selectedVal2;
-
-      let charges = 0;
-      let currentStat = 0;
-      let multiplier = 1.0;
-
-      if (type === "UpgradeRock") {
-        charges = p.rock.currentCharges;
-        currentStat = isAtk ? p.rock.currentATK : p.rock.currentDEF;
-        multiplier = 1.1;
-      }
-      if (type === "UpgradePaper") {
-        charges = p.paper.currentCharges;
-        currentStat = isAtk ? p.paper.currentATK : p.paper.currentDEF;
-        multiplier = 1.1;
-      }
-      if (type === "UpgradeScissor") {
-        charges = p.scissor.currentCharges;
-        currentStat = isAtk ? p.scissor.currentATK : p.scissor.currentDEF;
-        multiplier = 0.9;
-      }
-
-      // ATK upgrade → charges yoksa gereksiz
-      if (isAtk && charges <= 0) {
-        return -2000;
-      }
-
-      // Etkin charges (puan taşmasını engellemek için)
-      const eff = Math.min(charges, 5);
-
-      score += upgradeValue * (2 + eff) * multiplier;
-      score += currentStat * 1 * multiplier;
-
-      break;
-    }
-
-    /** ---------------------
-     *  Default
-     * --------------------- */
-    default:
-      score += 10;
+  
+    return finalScore;
   }
-
-  return score;
-}
 
 
   // Action tipinden Loot indexini bulur (0, 1, 2, 3)
