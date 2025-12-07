@@ -143,108 +143,109 @@ export class DPAlgorithm implements IGigaverseAlgorithm {
 
 
 /**
- * Sade, doğru ve mantıklı loot seçimi.
- * Full can → heal alınmaz
- * Max HP / Max Armor → her zaman alınabilir
- */
-// --- TABLO BAZLI (TIER LIST) PUANLAMA MOTORU ---
+   * Loot seçimlerinde botun IQ'sunu belirleyen fonksiyon.
+   * GigaverseRandomLoot.ts dosyasındaki gerçek verilere göre güncellendi.
+   */
   private getLootSynergyScore(state: GigaverseRunState, loot: any): number {
     const p = state.player;
-    const type = loot.boonTypeString;
-    
-    // Değeri al (Saldırı veya Defans)
-    const isAtk = (loot.selectedVal1 || 0) > 0;
-    const val = isAtk ? loot.selectedVal1 : loot.selectedVal2;
-
-    // --- TABLO: STAT DEĞERİNE GÖRE PUAN (BASE SCORE TABLE) ---
-    // Bu tablo sayesinde +7'nin değeri +4'ten kat kat fazla olur.
-    // +1'in değeri ise diplerde olur.
-    let baseScore = 0;
-    if (val <= 1) baseScore = 5;          // Çöp
-    else if (val === 2) baseScore = 200;  // İdare Eder
-    else if (val === 3) baseScore = 500;  // İyi
-    else if (val === 4) baseScore = 1200; // Çok İyi
-    else if (val === 5) baseScore = 2500; // Harika
-    else if (val >= 6) baseScore = 10000; // Efsanevi (Kesin Al)
-
-    let finalScore = 0;
-
+    // Dosyadan öğrendiğimiz kesin stringler
+    const type = loot.boonTypeString; 
+    let score = 0;
+  
     switch (type) {
-      // --- CAN YÖNETİMİ ---
+      // ---------------------------------------------------------
+      // 1. CAN YÖNETİMİ (Heal vs MaxHealth)
+      // ---------------------------------------------------------
       case "Heal": {
         const missingHealth = p.health.max - p.health.current;
-        const healAmount = val; // Heal için val1 kullanılıyor
-        
-        if (missingHealth <= 0) return -5000; // Can full ise ALMA
-        
-        // Heal için özel tablo: Ne kadar çok heal, o kadar iyi ama aciliyete bağlı.
+        const healAmount = loot.selectedVal1; // Dosyadaki healValues
+
+        // KURAL 1: Canın full ise veya fulle çok yakınsa alma!
+        if (missingHealth <= 0) {
+          return -100000; // ASLA ALMA (Çok büyük ceza)
+        }
+
+        // KURAL 2: "Overheal" (Boşa giden iyileştirme) hesabı yap.
+        // 5 canın eksikken 36'lık pot içme.
         const effectiveHeal = Math.min(missingHealth, healAmount);
         
-        // Aciliyet Çarpanı
-        let urgency = 1;
-        const hpPercent = p.health.current / p.health.max;
-        if (hpPercent < 0.30) urgency = 20;      // Ölüyoruz
-        else if (hpPercent < 0.50) urgency = 5;  // Lazım
-        else urgency = 0.5;                      // Keyfi
+        // Can ne kadar azsa, iyileştirmenin değeri o kadar artar (Logaritmik değer)
+        // Canın %100 ise katsayı 1, %10 ise katsayı 10.
+        const urgencyMult = p.health.max / Math.max(1, p.health.current); 
+        
+        score += effectiveHeal * 10 * urgencyMult;
+        break;
+      }
 
-        // Heal Formülü: (Miktar * 50) * Aciliyet
-        // Örn: +6 Heal, Acil Durumda -> 300 * 20 = 6000 Puan (Her silahı geçer)
-        finalScore = effectiveHeal * 50 * urgency;
-        break;
-      }
-  
-      // --- MAX HP (TIER S) ---
       case "AddMaxHealth": {
-        // Can her şeyden değerlidir. Tablo puanını x2 yap.
-        // +2 Health -> 200 * 2 = 400 Puan.
-        // +7 Health -> 10000 * 2 = 20000 Puan.
-        finalScore = baseScore * 2.0; 
+        // Kalıcı can artışı her zaman iyidir.
+        // Değer aralığı: 2 - 12
+        const amount = loot.selectedVal1;
+        score += amount * 15; 
         break;
       }
-  
-      // --- MAX ARMOR (TIER A) ---
+
       case "AddMaxArmor": {
-        // Zırh çok değerlidir. Tablo puanını x1.8 yap.
-        // +2 Armor -> 200 * 1.8 = 360 Puan.
-        finalScore = baseScore * 1.8;
+        // Zırh genelde candan daha zor bulunur (Max 5). Çok kıymetlidir.
+        const amount = loot.selectedVal1;
+        score += amount * 20;
         break;
       }
-  
-      // --- SİLAHLAR ---
+
+      // ---------------------------------------------------------
+      // 2. SALDIRI/SAVUNMA GELİŞTİRMELERİ (BUILD MANTIĞI)
+      // ---------------------------------------------------------
       case "UpgradeRock":
       case "UpgradePaper":
       case "UpgradeScissor": {
-        let buildMultiplier = 1.0;
-        let charges = 0;
+        // Simülatör koduna göre:
+        // selectedVal1 > 0 ise ATK
+        // selectedVal2 > 0 ise DEF
+        const isAtk = loot.selectedVal1 > 0;
+        const amount = isAtk ? loot.selectedVal1 : loot.selectedVal2;
+
+        // Hangi elemente ait olduğunu ve elimizde kaç mermi (charge) olduğunu bulalım
+        let currentCharges = 0;
+        let currentStats = 0;
 
         if (type === "UpgradeRock") {
-            charges = p.rock.currentCharges;
-            buildMultiplier = 2.0; // Favori
+          currentCharges = p.rock.currentCharges;
+          currentStats = isAtk ? p.rock.currentATK : p.rock.currentDEF;
         } else if (type === "UpgradePaper") {
-            charges = p.paper.currentCharges;
-            buildMultiplier = 2.0; // Favori
+          currentCharges = p.paper.currentCharges;
+          currentStats = isAtk ? p.paper.currentATK : p.paper.currentDEF;
         } else if (type === "UpgradeScissor") {
-            charges = p.scissor.currentCharges;
-            buildMultiplier = 0.5; // Zayıf
+          currentCharges = p.scissor.currentCharges;
+          currentStats = isAtk ? p.scissor.currentATK : p.scissor.currentDEF;
         }
 
-        // Mermi Etkisi: Mermimiz varsa silahın değeri biraz artar (x1.2), yoksa düşer (x0.8)
-        let chargeBonus = (charges > 0) ? 1.2 : 0.8;
+        // ZEKA BURADA:
+        // Eğer elimde o elementin kartı (charge) HİÇ yoksa, geliştirmek anlamsızdır.
+        // Ama elimde 3 tane Rock kartı varsa, Rock ATK güçlendirmesi inanılmaz değerlidir.
+        
+        if (currentCharges === 0) {
+          // Kartımız yoksa bile geleceğe yatırım olabilir ama düşük puan verelim.
+          score += amount * 2; 
+        } else {
+          // Elimde kart var, bu geliştirme direkt gücümü katlar!
+          // Çarpan: (Gelen Güç) x (Elimdeki Kart Sayısı) x (Önem Katsayısı)
+          score += amount * currentCharges * 5;
+        }
 
-        // Silah Puanı: Tablo Puanı * Build * Mermi
-        // +2 Kılıç (Favori, Mermili) -> 200 * 2.0 * 1.2 = 480 Puan.
-        // +3 Kılıç -> 500 * 2.0 * 1.2 = 1200 Puan.
-        finalScore = baseScore * buildMultiplier * chargeBonus;
+        // "Stacking" Mantığı: Bir şeye odaklanmak genelde daha iyidir.
+        // Zaten güçlü olduğum yönü daha da güçlendireyim.
+        score += currentStats * 2; 
         
         break;
       }
-
+      
       default:
-        finalScore = 20; 
+        // Tanınmayan eşyalar için standart puan (Hata olmaması için)
+        score += 20; 
         break;
     }
   
-    return finalScore;
+    return score;
   }
 
 
