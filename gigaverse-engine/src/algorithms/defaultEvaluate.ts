@@ -1,56 +1,88 @@
-import { GigaverseRunState } from "../simulator/GigaverseTypes";
+// path: gigaverse-engine/src/algorithms/defaultEvaluate.ts
 
+import { GigaverseRunState, GigaverseFighter, GigaverseMoveState } from "../simulator/GigaverseTypes";
+
+/**
+ * Evaluates the state to give a numeric score.
+ * Higher is better.
+ * OPTIMIZED FOR: Expectimax (Standard Version)
+ * Balance: Survival > Damage > Ammo Economy
+ */
 export function defaultEvaluate(state: GigaverseRunState): number {
-  const player = state.player;
+  const p = state.player;
+  const e = state.enemies[state.currentEnemyIndex];
 
-  // If player is dead => minimal
-  if (player.health.current <= 0) return 0;
+  // 1. ÖLÜM KONTROLÜ (KIRMIZI ÇİZGİ)
+  // Eğer bu senaryoda ölüyorsak, puan -1 Milyon.
+  // Expectimax ortalama alsa bile bu kadar düşük puan o yolu seçtirmez.
+  if (p.health.current <= 0) return -1000000;
 
-  // 1) Main scoring: how many enemies we’ve defeated so far
-  const enemiesDefeated = state.currentEnemyIndex;
+  let score = 0;
 
-  // 2) Reward current HP ratio & armor ratio
-  const hpRatio =
-    player.health.max > 0 ? player.health.current / player.health.max : 0;
-  const armorRatio =
-    player.armor.max > 0 ? player.armor.current / player.armor.max : 0;
+  // 2. İLERLEME VE ZAFER
+  score += state.currentEnemyIndex * 100000; 
 
-  // 3) Synergy for top 2 moves
-  //    We look at (ATK + DEF) for each move, identify top 2
-  const moves = [
-    { name: "rock", stats: player.rock },
-    { name: "paper", stats: player.paper },
-    { name: "scissor", stats: player.scissor },
-  ];
-  moves.sort(
-    (a, b) =>
-      b.stats.currentATK +
-      b.stats.currentDEF -
-      (a.stats.currentATK + a.stats.currentDEF)
-  );
-  const [best1, best2] = moves;
+  // Düşman öldü mü? Harika!
+  if (!e || e.health.current <= 0) {
+      score += 50000;
+      // Zafer anında ne kadar canımız kaldığı çok önemli
+      return score + (p.health.current * 500); 
+  }
 
-  // Simple synergy factor: sum of (ATK+DEF) of best 2 moves * 0.01
-  // Adjust as you like
-  const synergy =
-    (best1.stats.currentATK +
-      best1.stats.currentDEF +
-      best2.stats.currentATK +
-      best2.stats.currentDEF) *
-    0.01;
+  // 3. HAYATTA KALMA (MUTLAK DEĞERLER)
+  // Oran (Ratio) kullanmıyoruz. 30 Can, 10 Candan iyidir.
+  
+  // Can: En değerli varlığımız.
+  score += p.health.current * 200; 
 
-  // 4) Penalty for negative charges
-  const negativeChargesCount = moves.filter(
-    (m) => m.stats.currentCharges < 0
-  ).length;
-  const spamPenalty = negativeChargesCount * 0.3;
+  // Zırh: Canın kalkanıdır.
+  score += p.armor.current * 100; 
 
-  // Build final
-  return (
-    enemiesDefeated +
-    hpRatio * 2.0 + // weigh HP strongly
-    armorRatio +
-    synergy -
-    spamPenalty
-  );
+  // ZIRH KIRILMA TEHLİKESİ
+  // Zırh 0'a inerse savunmasız kalırız. Buna ceza veriyoruz.
+  if (p.armor.current === 0) {
+      score -= 2000; 
+  }
+
+  // 4. HASAR (AGGRESSION)
+  // Düşmanın canını ne kadar azalttık?
+  const damageDealt = e.health.max - e.health.current;
+  score += damageDealt * 150; 
+
+  // 5. EKONOMİ (MERMİ YÖNETİMİ)
+  // Mermi (Charge) durumuna göre puan veriyoruz.
+  const myMoves = [p.rock, p.paper, p.scissor];
+  let myTotalStats = 0;
+
+  for (const m of myMoves) {
+      myTotalStats += m.currentATK + m.currentDEF;
+
+      // Mermimiz 0 ise kötüdür, savunmasızız demektir.
+      if (m.currentCharges <= 0) score -= 300; 
+
+      // Mermimiz varsa iyidir (Ama 3'ten sonrası zaten dolmaz, max 3)
+      // İlk mermi çok değerlidir (+100), diğerleri bonus (+20).
+      if (m.currentCharges === 1) score += 100;
+      else if (m.currentCharges > 1) score += 120;
+  }
+  
+  // Stat gücümüzü de hesaba katalım (Geleceğe yatırım)
+  score += myTotalStats * 50;
+
+  // 6. TEHDİT ANALİZİ
+  // Düşmanın mermisi varsa (bize vurabilecekse) puanı biraz kıralım.
+  // Böylece bot, düşmanın mermisinin bittiği anları "Fırsat" olarak görür.
+  const enemyMoves = [e.rock, e.paper, e.scissor];
+  let threatScore = 0;
+
+  for (const em of enemyMoves) {
+      if (em.currentCharges > 0) {
+          // Düşmanın saldırı gücü kadar tehdit var
+          threatScore += (em.currentATK * 20); 
+      }
+  }
+  
+  score -= threatScore;
+
+  return score;
 }
